@@ -9,11 +9,13 @@ Workflow (per the spec):
   Step 2  Fetch that Core AE's faculty sessions from CMIS.
   Step 3  Highlight sessions available for Extended AE observation (yellow).
   Step 4  Extended AE claims sessions (status dropdown). Claimed -> GREEN.
-  Step 5  Mock Interview default: every member's own CMIS slot defaults to
-          Mock Interview. Claiming an Evaluation for that slot, or manually
-          picking Training / Project Involvement / Other on the Calendar
-          tab, removes the default automatically; clearing either restores
-          it. See ae_slot_task in db.py.
+  Step 5  CMIS task defaults: each member's own CMIS slot is typed from its
+          course alias — the plr* family (plr_mi*, plr_crd*, PLR_SAVE, the
+          placement/interview modules) -> Mock Interview, any other course
+          alias -> Teaching. Claiming an Evaluation for that slot, or manually
+          picking Training / Project Involvement / Other on the Calendar tab,
+          overrides that; re-selecting the slot's own CMIS type clears the
+          override. See ae_slot_task in db.py.
 
 RBAC via user_roles.role:
   admin        -> any Core AE, full visibility
@@ -50,7 +52,8 @@ THEMES = {
         "chip_bg": "#f2f3f5", "chip_text": "#5c6069",
         "shadow": "0 1px 2px rgba(16,18,29,.04), 0 4px 16px rgba(16,18,29,.05)",
         # task-type colors for the Calendar tab
-        "mock_bg": "#f4f5f7", "mock_border": "#9aa0ab", "mock_text": "#565c66",
+        "mock_bg": "#fff4ec", "mock_border": "#e07b39", "mock_text": "#8a4413",
+        "teach_bg": "#f4f5f7", "teach_border": "#9aa0ab", "teach_text": "#565c66",
         "train_bg": "#eef6ff", "train_border": "#3b82c4", "train_text": "#1c4e73",
         "proj_bg": "#f5eefd", "proj_border": "#8b5cf6", "proj_text": "#4c2889",
         "other_bg": "#fdf0f3", "other_border": "#e0577a", "other_text": "#7a1330",
@@ -65,7 +68,8 @@ THEMES = {
         "chip_bg": "#232428", "chip_text": "#b6bac2",
         "shadow": "0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.5)",
         # task-type colors for the Calendar tab
-        "mock_bg": "#1c1d21", "mock_border": "#5a5f6a", "mock_text": "#b6bac2",
+        "mock_bg": "#2a1a0f", "mock_border": "#e0873f", "mock_text": "#f5c795",
+        "teach_bg": "#1c1d21", "teach_border": "#5a5f6a", "teach_text": "#b6bac2",
         "train_bg": "#12202f", "train_border": "#4f9fe0", "train_text": "#a9d6fb",
         "proj_bg": "#221a35", "proj_border": "#a377f5", "proj_text": "#d9c8fb",
         "other_bg": "#301521", "other_border": "#e26f90", "other_text": "#f7b8ca",
@@ -375,6 +379,7 @@ def _css(t: dict, name: str = "light") -> str:
       }}
       .tcard:hover {{ transform:translateX(2px); box-shadow:{t['shadow']}; }}
       .tcard-mock  {{ background:{t['mock_bg']};  border-left-color:{t['mock_border']}; }}
+      .tcard-teach {{ background:{t['teach_bg']}; border-left-color:{t['teach_border']}; }}
       .tcard-eval  {{ background:{t['claim_bg']}; border-left-color:{t['claim_border']}; }}
       .tcard-train {{ background:{t['train_bg']}; border-left-color:{t['train_border']}; }}
       .tcard-proj  {{ background:{t['proj_bg']};  border-left-color:{t['proj_border']}; }}
@@ -384,6 +389,7 @@ def _css(t: dict, name: str = "light") -> str:
       .tcard-sub {{ font-size:.78rem; color:{t['muted']}; margin-top:3px; }}
       .tchip {{ font-size:.68rem; font-weight:600; padding:2px 9px; border-radius:980px; }}
       .tchip-mock  {{ background:{t['mock_border']};  color:#fff; }}
+      .tchip-teach {{ background:{t['teach_border']}; color:#fff; }}
       .tchip-eval  {{ background:{t['claim_border']}; color:#04301f; }}
       .tchip-train {{ background:{t['train_border']}; color:#fff; }}
       .tchip-proj  {{ background:{t['proj_border']};  color:#fff; }}
@@ -833,12 +839,15 @@ def _calendar_members_for(user, role) -> list[tuple[str, str]]:
 
 
 def _calendar_tab(user, role):
-    st.markdown("### 📅 Calendar — Mock Interview default & task assignment")
+    st.markdown("### 📅 Calendar — CMIS task defaults & assignment")
     st.caption(
-        "Every slot in a member's own CMIS schedule defaults to **Mock Interview**. "
-        "Claiming an Evaluation for that slot (Sessions tab) removes the default "
-        "automatically; picking Training / Project Involvement / Other here does the "
-        "same. Clear a manual pick to fall back to Mock Interview."
+        "Each slot in a member's own CMIS schedule is typed from its course "
+        "alias: **🎯 Mock Interview** for the placement/interview modules "
+        "(the `plr*` family — `plr_mi*`, `plr_crd*`, `PLR_SAVE`), or "
+        "**🏫 Teaching** for any regular course module. Claiming an Evaluation "
+        "for a slot (Sessions tab) overrides that automatically; picking "
+        "Training / Project Involvement / Other here does the same. "
+        "Re-selecting the slot's own CMIS type clears the override."
     )
 
     members = _calendar_members_for(user, role)
@@ -910,9 +919,15 @@ def _calendar_tab(user, role):
                             unsafe_allow_html=True,
                         )
                     elif is_editable:
+                        # Options = this slot's own CMIS-derived default first,
+                        # then the manual override tasks (dedup, keep order).
+                        default_task = r.get("default_task") or "mock_interview"
+                        override_tasks = ["training", "project_involvement", "other"]
+                        opts = [default_task] + [t for t in override_tasks
+                                                 if t != default_task]
                         choice = st.selectbox(
-                            "task", db.MANUAL_TASK_TYPES,
-                            index=db.MANUAL_TASK_TYPES.index(task) if task in db.MANUAL_TASK_TYPES else 0,
+                            "task", opts,
+                            index=opts.index(task) if task in opts else 0,
                             format_func=lambda t: db.TASK_LABELS.get(t, t),
                             key=f"tk_{key}", label_visibility="collapsed",
                         )
@@ -940,6 +955,7 @@ def _calendar_tab(user, role):
                 db.set_slot_task(
                     member_email, member_role, r["_date"], r["slot_time"],
                     r.get("slot_name"), new_task, other_note=note, set_by=user["email"],
+                    default_task=r.get("default_task"),
                 )
             st.cache_data.clear()
             st.success(f"Saved {len(pending)} change{'s' if len(pending) != 1 else ''}.")
@@ -948,7 +964,8 @@ def _calendar_tab(user, role):
 
 def _task_css(task_type: str) -> str:
     return {
-        "mock_interview": "mock", "evaluation": "eval", "training": "train",
+        "mock_interview": "mock", "teaching": "teach",
+        "evaluation": "eval", "training": "train",
         "project_involvement": "proj", "other": "other",
     }.get(task_type, "mock")
 
