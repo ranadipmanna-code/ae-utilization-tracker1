@@ -855,29 +855,62 @@ def get_team_selections(core_ae_email: str, from_date: date, to_date: date) -> p
 
 
 # ===========================================================================
-# MOCK INTERVIEW DEFAULT / SLOT TASK ASSIGNMENT  ->  table: ae_slot_task
+# MOCK INTERVIEW / SLOT TASK ASSIGNMENT  ->  table: ae_slot_task
 #
 # A member's "own slots" are the CMIS rows where THEY are the email_id (their
-# own teaching hours) — not the trainer sessions they observe. Every such
-# slot defaults to 'mock_interview'. A row in ae_slot_task only exists when
-# that default has been overridden:
+# own teaching hours) — not the trainer sessions they observe.
+#
+# The DEFAULT task for each slot is DERIVED FROM CMIS ITSELF, via c_alias:
+#   - c_alias starting 'plr'  (plr_mi1/2, plr_crd1/2, plr_mi_save, PLR_SAVE)
+#                                                    -> mock_interview
+#     (the whole plr* family are the placement / interview modules)
+#   - anything else (a real course module: ISP, cs_ai, dp_*, java_core, ...)
+#                                                    -> teaching
+# So a slot is a Mock Interview because its CMIS course alias is a placement
+# module, NOT because no override row exists. This matches the live data.
+#
+# A row in ae_slot_task exists ONLY when that CMIS-derived default has been
+# overridden:
 #   - automatically, when the member claims an Evaluation for that exact
 #     (session_date, slot_time) — wired in from upsert_selection_for_role
 #     via sync_slot_task_from_evaluation()
-#   - manually, when the member picks Training / Project Involvement / Other
-#     for that slot from the Calendar tab
-# Clearing either kind of override deletes the row, which restores the
-# 'mock_interview' default automatically — nothing extra to do.
+#   - manually, when the member picks another task for that slot on the
+#     Calendar tab
+# Clearing an override deletes the row, restoring whatever CMIS implies for
+# that slot — nothing extra to do.
 # ===========================================================================
-TASK_TYPES = ["mock_interview", "evaluation", "training", "project_involvement", "other"]
-MANUAL_TASK_TYPES = ["mock_interview", "training", "project_involvement", "other"]
+
+# Full universe of task types a resolved slot can carry.
+TASK_TYPES = [
+    "mock_interview", "teaching",
+    "evaluation", "training", "project_involvement", "other",
+]
+# What a member may MANUALLY pick from the Calendar dropdown. Picking the
+# slot's own CMIS-derived default clears any override (see set_slot_task).
+MANUAL_TASK_TYPES = [
+    "mock_interview", "teaching",
+    "training", "project_involvement", "other",
+]
 TASK_LABELS = {
     "mock_interview": "🎯 Mock Interview",
+    "teaching": "🏫 Teaching",
     "evaluation": "🔎 Evaluation",
     "training": "📚 Training",
     "project_involvement": "🛠️ Project Involvement",
     "other": "✳️ Other",
 }
+
+
+def default_task_for_alias(c_alias: str | None) -> str:
+    """The task a CMIS slot implies from its course alias.
+    The whole plr* family (plr_mi1/2, plr_crd1/2, plr_mi_save, PLR_SAVE) are
+    the placement / interview modules -> mock_interview.
+    Everything else is a real teaching module -> teaching.
+    """
+    a = (c_alias or "").strip().lower()
+    if a.startswith("plr"):
+        return "mock_interview"
+    return "teaching"
 
 
 def role_for_email(email: str) -> str | None:
@@ -927,14 +960,20 @@ def get_slot_tasks(member_email: str, from_date: date, to_date: date) -> pd.Data
 def resolve_member_calendar(member_email: str, from_date: date, to_date: date) -> pd.DataFrame:
     """
     Every one of this member's own CMIS slots for the window, with the
-    resolved task merged in (defaults to 'mock_interview' when there's no
-    override row). Adds: _date, task_type, other_note, ref_selection_id, set_by.
+    resolved task merged in. The task for a slot is:
+        override row (if any)  >  CMIS-derived default (from c_alias)
+    Adds columns:
+        _date, default_task, task_type, is_default,
+        other_note, ref_selection_id, set_by
+    where default_task is what CMIS implies and is_default is True when no
+    override applies (task_type == default_task).
     """
     own = get_member_own_slots(member_email, from_date, to_date)
     if own.empty:
         return own
     own = own.copy()
     own["_date"] = pd.to_datetime(own["s_date"]).dt.date
+    own["default_task"] = own["c_alias"].apply(default_task_for_alias)
 
     tasks = get_slot_tasks(member_email, from_date, to_date)
     by_key: dict[str, Any] = {}
@@ -944,12 +983,16 @@ def resolve_member_calendar(member_email: str, from_date: date, to_date: date) -
             by_key[k] = t
 
     def _resolve(r) -> pd.Series:
+        default = r["default_task"]
         t = by_key.get(f"{r['_date']}|{r['slot_time']}")
         if t is None:
-            return pd.Series({"task_type": "mock_interview", "other_note": None,
-                               "ref_selection_id": None, "set_by": None})
-        return pd.Series({"task_type": t["task_type"], "other_note": t["other_note"],
-                           "ref_selection_id": t["ref_selection_id"], "set_by": t["set_by"]})
+            return pd.Series({"task_type": default, "is_default": True,
+                               "other_note": None, "ref_selection_id": None,
+                               "set_by": None})
+        return pd.Series({"task_type": t["task_type"], "is_default": False,
+                           "other_note": t["other_note"],
+                           "ref_selection_id": t["ref_selection_id"],
+                           "set_by": t["set_by"]})
 
     resolved = own.join(own.apply(_resolve, axis=1))
     return resolved
@@ -964,12 +1007,16 @@ def set_slot_task(
     task_type: str,
     other_note: str | None = None,
     set_by: str | None = None,
+    default_task: str | None = None,
 ) -> None:
     """
-    Manually set (or reset) a slot's task. task_type='mock_interview' deletes
-    the override row so the slot simply falls back to the default — that's
-    the only "clear" path, by design.
+    Manually set (or reset) a slot's task. Picking the slot's own CMIS-derived
+    default (pass it as `default_task`) deletes the override row so the slot
+    falls back to what CMIS implies — that's the "clear" path. When
+    default_task is not supplied we fall back to the legacy behaviour of
+    treating 'mock_interview' as the clear value.
     """
+    clear_value = default_task or "mock_interview"
     with app_engine().begin() as conn:
         existing = conn.execute(
             text(
@@ -979,7 +1026,7 @@ def set_slot_task(
             {"e": member_email, "d": session_date, "st": slot_time},
         ).fetchone()
 
-        if task_type == "mock_interview":
+        if task_type == clear_value:
             if existing:
                 conn.execute(text("DELETE FROM ae_slot_task WHERE id = :id"), {"id": existing[0]})
             return
