@@ -1,13 +1,20 @@
 -- ===========================================================================
--- Mock Interview default / slot task assignment
+-- CMIS task defaults / slot task assignment  ->  table: ae_slot_task
 -- Run ONCE in phpMyAdmin: Anudip_AE_Team -> SQL tab -> paste -> Go
 --
--- Every slot in a member's OWN CMIS schedule (upcoming_trainer_utilization_view
--- rows where email_id = their email) defaults to 'mock_interview'. A row here
--- only exists when that default has been overridden, either automatically
--- (they claimed an Evaluation for that date+slot_time) or manually
--- (Training / Project Involvement / Other). Deleting the row — or setting
--- task_type back to 'mock_interview' — restores the default.
+-- Each slot in a member's OWN CMIS schedule (upcoming_trainer_utilization_view
+-- rows where email_id = their email) has a DEFAULT task DERIVED FROM CMIS via
+-- the course alias (c_alias):
+--     plr* family (plr_mi1/2, plr_crd1/2, plr_mi_save, PLR_SAVE — the
+--                  placement / interview modules)  -> mock_interview
+--     anything else (a real course module: ISP, cs_ai, dp_*, java_core, ...)
+--                                                   -> teaching
+-- The default is IMPLICIT: no row exists for it. A row here exists only when
+-- that CMIS default has been overridden, either automatically (the member
+-- claimed an Evaluation for that date+slot_time) or manually (Training /
+-- Project Involvement / Other, or explicitly pinning a different CMIS type).
+-- Deleting the row — or setting task_type back to the slot's own CMIS-derived
+-- default — restores the default.
 -- ===========================================================================
 
 CREATE TABLE IF NOT EXISTS `ae_slot_task` (
@@ -18,7 +25,8 @@ CREATE TABLE IF NOT EXISTS `ae_slot_task` (
   `slot_time`    VARCHAR(50)  COLLATE utf8mb4_0900_ai_ci NOT NULL,
   `slot_name`    VARCHAR(50)  COLLATE utf8mb4_0900_ai_ci NULL,        -- display only, from CMIS
 
-  `task_type` ENUM('mock_interview','evaluation','training','project_involvement','other')
+  `task_type` ENUM('mock_interview','teaching',
+                   'evaluation','training','project_involvement','other')
               COLLATE utf8mb4_0900_ai_ci NOT NULL DEFAULT 'mock_interview',
   `other_note` VARCHAR(255) COLLATE utf8mb4_0900_ai_ci NULL,
 
@@ -33,3 +41,13 @@ CREATE TABLE IF NOT EXISTS `ae_slot_task` (
   UNIQUE KEY `uniq_member_slot` (`member_email`, `session_date`, `slot_time`),
   KEY `idx_member_date` (`member_email`, `session_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ---------------------------------------------------------------------------
+-- MIGRATION — run this ONLY if you already created ae_slot_task with the old
+-- ENUM. It widens task_type to include 'teaching'. Safe to skip if you just
+-- ran the CREATE TABLE above for the first time.
+-- ---------------------------------------------------------------------------
+-- ALTER TABLE `ae_slot_task`
+--   MODIFY `task_type` ENUM('mock_interview','teaching',
+--                           'evaluation','training','project_involvement','other')
+--   COLLATE utf8mb4_0900_ai_ci NOT NULL DEFAULT 'mock_interview';
