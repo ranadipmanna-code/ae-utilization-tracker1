@@ -378,6 +378,7 @@ def _css(t: dict, name: str = "light") -> str:
       .scard-avail {{ border-left-color:{t['avail_border']}; }}
       .scard-mine  {{ border-left-color:{t['accent']}; background:{t['done_bg']}; }}
       .scard-lock  {{ border-left-color:{t['claim_border']}; background:{t['claim_bg']}; }}
+      .scard-mock  {{ border-left-color:{t['mock_border']}; background:{t['mock_bg']}; }}
       .scard-top {{ font-size:.95rem; font-weight:600; letter-spacing:-.01em; color:{t['text']};
                     display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
       .scard-sub {{ font-size:.79rem; color:{t['muted']}; margin-top:4px; }}
@@ -1313,6 +1314,44 @@ def _sessions_tab(user, role):
                     else:
                         st.info("No changes to save.")
 
+    # A Core AE (and admin) can see the Mock Interviews their paired Extended
+    # AEs have selected — e.g. what Pulak picks is visible to Arnab. Read-only:
+    # the Core AE observes the choices, the Extended AE still owns them.
+    if role in ("core_ae", "admin"):
+        ext_aes = db.extended_aes_for_core(core_ae_email)
+        frames = []
+        for ae in ext_aes:
+            mi = db.get_mock_interview_assignments(ae, date_from, date_to)
+            if not mi.empty:
+                mi = mi.copy()
+                mi["_ae"] = ae
+                frames.append(mi)
+        if frames:
+            team_mi = pd.concat(frames, ignore_index=True)
+            team_mi = team_mi[team_mi["status"].isin(list(CLAIMED))]
+        else:
+            team_mi = pd.DataFrame()
+
+        if not team_mi.empty:
+            st.markdown("#### 🎯 Team Mock Interviews")
+            st.caption(
+                "Mock Interview sessions your Extended AE team has selected in "
+                "this date range (read-only)."
+            )
+            team_mi = team_mi.sort_values(["_ae", "session_date", "slot_time"])
+            for _, r in team_mi.iterrows():
+                ae_name = str(r["_ae"]).split("@")[0]
+                trainer = (r.get("trainer_name") or "Unknown trainer")
+                day_lbl = pd.to_datetime(r["session_date"]).strftime("%a, %d %b")
+                st.markdown(
+                    f"<div class='scard scard-mock'>"
+                    f"<div class='scard-top'>🕑 {day_lbl} · {r['slot_time']} "
+                    f"· <b>{ae_name}</b></div>"
+                    f"<div class='scard-sub'>{trainer} · {r.get('batch_code') or ''} · "
+                    f"{r.get('c_alias') or ''} · {r.get('program_name') or ''}</div></div>",
+                    unsafe_allow_html=True,
+                )
+
     if pick_trainer != "All trainers":
         sessions = sessions[sessions["_trainer"] == pick_trainer]
     if pick_batch != "All batches":
@@ -1670,79 +1709,12 @@ def _sessions_table(sessions, core_ae_email, date_from, date_to, role, user_emai
     # 40 cards meant ~120 Streamlit elements per page (a column pair, a
     # markdown block and a selectbox each). That element count, not the SQL,
     # is what made the page feel sluggish. 25 keeps it comfortably responsive.
-    # ---- renderer choice -------------------------------------------------
-    # The card list is pretty but expensive: each row costs a column pair, a
-    # markdown block and a selectbox, so a 25-row page is ~100 Streamlit
-    # elements and every rerun re-serialises all of them. The table is a
-    # SINGLE element regardless of row count, which is why it stays smooth
-    # where the cards crawl. Cards remain available for anyone who prefers
-    # them.
-    vcol1, vcol2 = st.columns([2, 3])
-    with vcol1:
-        view_mode = st.radio(
-            "View",
-            ["⚡ Table (fast)", "🗂 Cards"],
-            horizontal=True,
-            key="sessions_view_mode",
-            label_visibility="collapsed",
-        )
-    fast = view_mode.startswith("⚡")
-
+    # ---- renderer --------------------------------------------------------
+    # Cards are the only view. (The old "Table (fast)" data_editor toggle was
+    # removed on request.)
     pending: dict = {}  # key -> (new status, row) — collected then saved together
 
-    if fast:
-        with vcol2:
-            st.caption(
-                "Tick **Claim** on the sessions you're taking, then Save. "
-                "Rows held by a teammate are locked."
-            )
-        me = user_email.lower()
-        grid = pd.DataFrame({
-            "Claim": df["_owner"].fillna("").str.lower().eq(me)
-                     & df["Status"].isin(list(CLAIMED)),
-            "Date": pd.to_datetime(df["_date"]).dt.strftime("%a, %d %b"),
-            "Time": df["slot_time"].astype(str),
-            "Trainer": df["Trainer"],
-            "Batch": df["batch_code"].fillna(""),
-            "Module": df["c_alias"].fillna(""),
-            "Held by": [
-                "★ You" if (o or "").lower() == me
-                else (f"🔒 {o.split('@')[0]}" if o and s in CLAIMED else "◷ Available")
-                for o, s in zip(df["_owner"].fillna(""), df["Status"])
-            ],
-        }).reset_index(drop=True)
-
-        edited = st.data_editor(
-            grid,
-            hide_index=True,
-            use_container_width=True,
-            height=min(640, 90 + 35 * min(len(grid), 16)),
-            disabled=["Date", "Time", "Trainer", "Batch", "Module", "Held by"],
-            column_config={
-                "Claim": st.column_config.CheckboxColumn("Claim", width="small"),
-            },
-            key="sessions_fast_editor",
-        )
-
-        before = grid["Claim"].tolist()
-        after = edited["Claim"].tolist()
-        locked_attempts = 0
-        for i, (b, a) in enumerate(zip(before, after)):
-            if b == a:
-                continue
-            row = df.iloc[i]
-            if not row["_editable"]:
-                locked_attempts += 1
-                continue
-            pending[row["_key"]] = ("Selected" if a else "Not Selected", row)
-        if locked_attempts:
-            st.warning(
-                f"{locked_attempts} row(s) are held by a teammate and were ignored."
-            )
-        saved = st.button("💾  Save changes", type="primary", use_container_width=True)
-
-    else:
-        saved = _render_session_cards(df, user_email, can_select, pending)
+    saved = _render_session_cards(df, user_email, can_select, pending)
 
     if saved:
         if not pending:
