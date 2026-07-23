@@ -936,15 +936,6 @@ def _calendar_members_for(user, role) -> list[tuple[str, str]]:
 
 def _calendar_tab(user, role):
     st.markdown("### 📅 Calendar — CMIS task defaults & assignment")
-    st.caption(
-        "Each slot in a member's own CMIS schedule is typed from its course "
-        "alias: **🎯 Mock Interview** for the placement/interview modules "
-        "(the `plr*` family — `plr_mi*`, `plr_crd*`, `PLR_SAVE`), or "
-        "**🏫 Teaching** for any regular course module. Claiming an Evaluation "
-        "for a slot (Sessions tab) overrides that automatically; picking "
-        "Training / Project Involvement / Other here does the same. "
-        "Re-selecting the slot's own CMIS type clears the override."
-    )
 
     members = _calendar_members_for(user, role)
     labels = [lbl for _, lbl in members]
@@ -955,9 +946,23 @@ def _calendar_tab(user, role):
     is_editable = member_email.lower() == user["email"].lower()
     member_role = db.role_for_email(member_email) or role
 
+    # Offsets in weeks from the current week. Fixed labels for the four weeks
+    # closest to today; beyond that, the label is just the date range, since
+    # "Last/This/Next/Week after" doesn't scale. -4..+20 covers roughly a
+    # month back and five months forward — wide enough to reach any CMIS slot
+    # we've seen (the furthest-out plr_* data currently runs to late November).
+    _WEEK_LABELS = {-1: "Last week", 0: "This week", 1: "Next week", 2: "Week after"}
+
+    def _week_label(offset: int) -> str:
+        if offset in _WEEK_LABELS:
+            return _WEEK_LABELS[offset]
+        mon, sun = current_week_bounds(offset)
+        return f"Week of {mon:%b %d} – {sun:%b %d}"
+
+    week_options = list(range(-4, 21))
     wk = st.selectbox(
-        "Week", [-1, 0, 1, 2], index=1,
-        format_func=lambda o: {-1: "Last week", 0: "This week", 1: "Next week", 2: "Week after"}[o],
+        "Week", week_options, index=week_options.index(0),
+        format_func=_week_label,
         key="cal_week",
     )
     ws, we = current_week_bounds(wk)
