@@ -1202,28 +1202,19 @@ def _sessions_tab(user, role):
     st.session_state["shared_from"] = date_from
     st.session_state["shared_to"] = date_to
 
-    if role == "admin":
-        with st.expander("🎯 Auto-assign Mock Interviews", expanded=False):
-            st.caption(
-                "Pre-selects up to a cap of plr_mi1 / plr_mi2 / plr_mi_save "
-                "sessions per Extended AE per week, from anywhere in CMIS — "
-                "written as a normal 'Selected' claim they can unselect. "
-                "Skips anything already claimed by anyone, and never "
-                "double-books an AE against their own CMIS commitments or "
-                "another auto-assigned slot. Uses the date range above."
-            )
-            cap = st.number_input("Max per Extended AE per week", min_value=1, max_value=10, value=3)
-            if st.button("Run auto-assignment for this range"):
-                with st.spinner("Assigning…"):
-                    result = db.auto_assign_mock_interviews(date_from, date_to, cap_per_week=int(cap))
-                st.cache_data.clear()
-                if result["assigned"] == 0:
-                    st.info(f"Nothing to assign ({result['candidates']} candidate sessions found, "
-                            "all already claimed or no eligible AE had room).")
-                else:
-                    per_ae = ", ".join(f"{ae.split('@')[0]}: {n}" for ae, n in result["by_ae"].items())
-                    st.success(f"Assigned {result['assigned']} of {result['candidates']} candidate "
-                               f"sessions. {per_ae}")
+    # Runs automatically whenever the date range is known — no admin action
+    # needed. Cached for 10 minutes per range so repeated page loads/reruns
+    # don't redo the full allocation; the underlying write is idempotent
+    # either way, so this is purely a "don't do it more than necessary" cache.
+    mi_run = db.ensure_mock_interviews_assigned(date_from, date_to, cap_per_week=3)
+    if role in ("admin", "extended_ae"):
+        st.caption(
+            f"🎯 Mock Interview auto-assign for {date_from} → {date_to}: "
+            f"{mi_run['candidates']} candidate session(s) found system-wide, "
+            f"{mi_run['assigned']} newly assigned this run "
+            f"(0 is expected if everyone eligible is already at cap or "
+            f"there's simply nothing free left in this range)."
+        )
 
 
     if role == "extended_ae":
