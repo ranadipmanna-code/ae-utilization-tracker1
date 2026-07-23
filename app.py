@@ -218,18 +218,36 @@ def _css(t: dict, name: str = "light") -> str:
         background:transparent !important; color:{t['accent']} !important;
       }}
 
-      /* ---------- CALENDAR internals (kill the black empty cells) ---------- */
-      /* catch-all: EVERY element inside the calendar popover gets a light bg,
-         including the empty out-of-month padding cells that render black. */
+      /* ---------- CALENDAR internals (kill the black empty cells) ----------
+         baseweb re-injects its own !important styles when the popover opens,
+         which land AFTER this block and out-specify a plain catch-all — that's
+         why whole leading/trailing week rows still rendered black. We beat it
+         two ways: (1) pin the light background on the popover SHELL itself, so
+         even elements we don't name show light behind them, and (2) use a
+         high-specificity chain (popover > calendar > descendants) plus explicit
+         ::before/::after, since the black in empty cells is often a pseudo. */
+      div[data-baseweb="popover"] div[data-baseweb="calendar"],
+      div[data-baseweb="popover"] div[data-baseweb="calendar"] *,
+      div[data-baseweb="popover"] div[data-baseweb="calendar"] *::before,
+      div[data-baseweb="popover"] div[data-baseweb="calendar"] *::after,
       div[data-baseweb="calendar"],
       div[data-baseweb="calendar"] *,
+      div[data-baseweb="calendar"] *::before,
+      div[data-baseweb="calendar"] *::after,
+      div[data-baseweb="calendar"] [role="grid"],
+      div[data-baseweb="calendar"] [role="row"],
+      div[data-baseweb="calendar"] [role="gridcell"],
+      div[data-baseweb="calendar"] [role="gridcell"] > div,
       div[data-baseweb="datepicker"],
       div[data-baseweb="datepicker"] * {{
         background-color:{t['surface']} !important;
+        background-image:none !important;
         color:{t['text']} !important;
         border-color:{t['border']} !important;
       }}
-      /* selected day */
+      /* selected day — highest specificity so it survives over the reset above */
+      div[data-baseweb="popover"] div[data-baseweb="calendar"] [aria-selected="true"],
+      div[data-baseweb="popover"] div[data-baseweb="calendar"] [aria-selected="true"] *,
       div[data-baseweb="calendar"] [aria-selected="true"],
       div[data-baseweb="calendar"] [aria-selected="true"] * {{
         background-color:{t['accent']} !important; color:#fff !important;
@@ -237,11 +255,12 @@ def _css(t: dict, name: str = "light") -> str:
       }}
       /* hovered day */
       div[data-baseweb="calendar"] [role="gridcell"]:hover,
+      div[data-baseweb="calendar"] [role="gridcell"]:hover *,
       div[data-baseweb="calendar"] [class*="Day"]:hover {{
         background-color:{t['accent_soft']} !important; color:{t['accent']} !important;
         border-radius:8px !important;
       }}
-      /* disabled / out-of-range days: faded, not black */
+      /* disabled / out-of-range days: faded surface, never black */
       div[data-baseweb="calendar"] [aria-disabled="true"],
       div[data-baseweb="calendar"] [aria-disabled="true"] * {{
         background-color:{t['surface']} !important;
@@ -1106,9 +1125,11 @@ def _sessions_tab(user, role):
         # same batch, back-to-back). Merging them shows one row per real class.
         merge_slots = st.checkbox(
             "Merge back-to-back slots into one class",
-            value=False,
+            value=True,
             help="CMIS records a 2-hour class as four 30-minute rows. "
-                 "Tick this to collapse consecutive slots for the same trainer & batch.",
+                 "Leave this on to see one row per real class — claiming it "
+                 "claims every 30-minute slot underneath in one tap. Untick to "
+                 "work with the raw 30-minute slots individually.",
         )
 
     if pick_trainer != "All trainers":
@@ -1215,6 +1236,10 @@ def _merge_consecutive(df: pd.DataFrame) -> pd.DataFrame:
             return
         first, last = run_rows[0], run_rows[-1]
         merged = dict(first)
+        # the original 30-min slot strings this class is built from — every
+        # claim/highlight/task write fans out across ALL of these so the DB
+        # stays identical to what an unmerged view would have written.
+        merged["_members"] = [str(r["slot_time"]) for r in run_rows]
         if len(run_rows) > 1:
             s = str(first["slot_time"]).split("-")[0].strip()
             e = str(last["slot_time"]).split("-")[-1].strip()
@@ -1342,9 +1367,30 @@ def _sessions_table(sessions, core_ae_email, date_from, date_to, role, user_emai
 
     df = sessions.copy()
     df["_key"] = df.apply(lambda r: f"{r['_date']}|{r['slot_time']}|{r['batch_code'] or ''}", axis=1)
-    df["Status"] = df["_key"].map(lambda k: status_by_key.get(k, "Not Selected"))
-    df["_owner"] = df["_key"].map(lambda k: owner_by_key.get(k))
-    df["_ownrole"] = df["_key"].map(lambda k: ownrole_by_key.get(k))
+
+    def _members_of(r) -> list[str]:
+        """The raw 30-min slot strings behind a row. A merged class carries the
+        list in `_members`; an unmerged row is just its own slot."""
+        m = r.get("_members")
+        if isinstance(m, (list, tuple)) and len(m) > 0:
+            return [str(x) for x in m]
+        return [str(r["slot_time"])]
+
+    def _row_state(r):
+        """Status/owner/role for a (possibly merged) row. A claimed member wins,
+        so a merged class shows as claimed if any slot underneath is claimed;
+        otherwise it falls back to the first member's state."""
+        batch = r["batch_code"] or ""
+        keys = [f"{r['_date']}|{m}|{batch}" for m in _members_of(r)]
+        for k in keys:
+            stt = status_by_key.get(k, "Not Selected")
+            if stt in CLAIMED or stt == "Choosing":
+                return pd.Series([stt, owner_by_key.get(k), ownrole_by_key.get(k)])
+        k0 = keys[0]
+        return pd.Series([status_by_key.get(k0, "Not Selected"),
+                          owner_by_key.get(k0), ownrole_by_key.get(k0)])
+
+    df[["Status", "_owner", "_ownrole"]] = df.apply(_row_state, axis=1)
     df["Trainer"] = (df["f_name"].fillna("") + " " + df["l_name"].fillna("")).str.strip()
     df["Duration"] = df.apply(lambda r: _fmt_duration(r), axis=1)
     df["_editable"] = df.apply(
@@ -1503,24 +1549,31 @@ def _sessions_table(sessions, core_ae_email, date_from, date_to, role, user_emai
         else:
             n = 0
             for key, (new_status, r) in pending.items():
-                sel_id = db.upsert_selection_for_role(
-                    role, user_email, r["_date"], r["slot_time"],
-                    r["m_code"], r["batch_code"], new_status,
-                )
-                db.set_highlight_flag(
-                    r["_date"], r["slot_time"], r["batch_code"],
-                    core_ae_email, user_email, new_status in CLAIMED,
-                )
-                # Mock Interview default mechanism: claiming/un-claiming an
-                # Evaluation here removes/restores the default on the
-                # Calendar tab for this exact (date, slot_time).
-                try:
-                    db.sync_slot_task_from_evaluation(
-                        user_email, role, r["_date"], r["slot_time"],
-                        new_status in CLAIMED, sel_id,
+                # A merged class writes the claim to EVERY 30-min slot it spans,
+                # so the DB is identical to claiming each slot by hand. An
+                # unmerged row has a single member (its own slot).
+                members = r.get("_members")
+                if not isinstance(members, (list, tuple)) or not members:
+                    members = [r["slot_time"]]
+                for m_slot in members:
+                    sel_id = db.upsert_selection_for_role(
+                        role, user_email, r["_date"], m_slot,
+                        r["m_code"], r["batch_code"], new_status,
                     )
-                except Exception:
-                    pass
+                    db.set_highlight_flag(
+                        r["_date"], m_slot, r["batch_code"],
+                        core_ae_email, user_email, new_status in CLAIMED,
+                    )
+                    # Mock Interview default mechanism: claiming/un-claiming an
+                    # Evaluation here removes/restores the default on the
+                    # Calendar tab for this exact (date, slot_time).
+                    try:
+                        db.sync_slot_task_from_evaluation(
+                            user_email, role, r["_date"], m_slot,
+                            new_status in CLAIMED, sel_id,
+                        )
+                    except Exception:
+                        pass
                 n += 1
             try:
                 db.recompute_weekly_summary(core_ae_email, date_from)
