@@ -1810,11 +1810,6 @@ def main():
         dashboard()
 
 
-if __name__ == "__main__":
-    main()
-
-
-
 def _render_session_cards(df, user_email, can_select, pending) -> bool:
     """The original card list, kept as an opt-in view.
 
@@ -1936,3 +1931,7 @@ def _render_session_cards(df, user_email, can_select, pending) -> bool:
 
         saved = st.form_submit_button("💾  Save changes", type="primary", use_container_width=True)
     return saved
+
+
+if __name__ == "__main__":
+    main()
