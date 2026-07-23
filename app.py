@@ -958,7 +958,8 @@ def _calendar_tab(user, role):
     )
     st.markdown(f"<div class='legend' style='margin:6px 0 14px'>{chip_row}</div>", unsafe_allow_html=True)
 
-    cal = cal.sort_values(["_date", "slot_time"]).reset_index(drop=True)
+    cal["_sort_mins"] = cal["slot_time"].map(_slot_start_minutes)
+    cal = cal.sort_values(["_date", "_sort_mins"]).drop(columns=["_sort_mins"]).reset_index(drop=True)
 
     pending: dict[str, tuple[str, str | None, pd.Series]] = {}
     with st.form(f"cal_form_{member_email}_{ws}"):
@@ -1251,6 +1252,26 @@ def _merge_consecutive(df: pd.DataFrame) -> pd.DataFrame:
 
     res = pd.DataFrame(out)
     return res.drop(columns=["_start", "_sort"], errors="ignore")
+
+
+def _slot_start_minutes(slot: str) -> int:
+    """Minutes-since-midnight for a slot's start, e.g. '11:00 AM - 11:30 AM' -> 660.
+
+    Used to sort slots chronologically. slot_time is a plain string, and a
+    plain string sort puts every '0…AM/PM' slot before every '1…AM/PM' slot
+    regardless of time of day (lexicographic '0' < '1') — so '02:30 PM' would
+    sort ahead of '11:00 AM' even though 11:00 AM comes first in the day.
+    Unparseable values sort last rather than raising, so one bad row doesn't
+    break the whole day's ordering.
+    """
+    if not slot or "-" not in str(slot):
+        return 10**6
+    try:
+        start = str(slot).split("-", 1)[0].strip()
+        t = pd.to_datetime(start, format="%I:%M %p")
+        return t.hour * 60 + t.minute
+    except Exception:
+        return 10**6
 
 
 def _parse_slot_minutes(slot: str) -> int | None:
