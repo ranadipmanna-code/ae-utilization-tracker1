@@ -1252,9 +1252,11 @@ def _sessions_tab(user, role):
                 if st.form_submit_button("💾  Save my Mock Interview choices", type="primary"):
                     for _id, new_status in mi_pending.items():
                         row = my_mi[my_mi["id"] == _id].iloc[0]
-                        db.upsert_selection_for_role(
-                            "extended_ae", user["email"], row["session_date"],
-                            row["slot_time"], row["module"], row["batch_code"], new_status,
+                        db.upsert_mock_interview_assignment(
+                            user["email"], row["session_date"], row["slot_time"],
+                            row["batch_code"], row["c_alias"], row.get("trainer_email"),
+                            row.get("trainer_name"), row.get("program_name"),
+                            status=new_status, source="manual",
                         )
                     if mi_pending:
                         st.cache_data.clear()
