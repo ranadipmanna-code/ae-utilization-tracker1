@@ -12,6 +12,7 @@ All CMIS access is strictly SELECT — we never write there.
 """
 from __future__ import annotations
 
+import calendar
 import re
 from datetime import date, timedelta
 from typing import Any
@@ -771,6 +772,27 @@ def core_ae_for_extended(extended_ae_email: str) -> str | None:
 MOCK_INTERVIEW_ALIASES = ("plr_mi1", "plr_mi2", "plr_mi_save")
 
 
+def _is_working_day(d: date) -> bool:
+    """Monday-Friday, plus ONLY the first and last Saturday of the month.
+
+    Extended AEs have some free time on Saturdays specifically, but not every
+    Saturday — the team runs on the first and last Saturday of each month
+    only. Every Sunday, and every OTHER Saturday (2nd/3rd/4th/5th), is a
+    non-working day and must never get an auto-assigned Mock Interview.
+    """
+    wd = d.weekday()  # Monday=0 ... Sunday=6
+    if wd < 5:
+        return True
+    if wd == 6:  # Sunday
+        return False
+    # Saturday (wd == 5): find every Saturday in this month, and check
+    # whether `d` is the first or the last one.
+    last_dom = calendar.monthrange(d.year, d.month)[1]
+    saturdays = [dd for dd in range(1, last_dom + 1)
+                 if date(d.year, d.month, dd).weekday() == 5]
+    return d.day == saturdays[0] or d.day == saturdays[-1]
+
+
 def _iso_week(d: date) -> tuple[int, int]:
     iso = d.isocalendar()
     return (iso[0], iso[1])
@@ -783,6 +805,7 @@ def _plan_mock_interview_assignments(
     already_claimed_keys: set[tuple],
     already_assigned_by_ae: dict[str, set[tuple]],
     cap_per_week: int = 3,
+    working_days_only: bool = True,
 ) -> list[tuple[str, dict]]:
     """Pure allocation logic — no DB access, so this is fully unit-testable.
 
@@ -791,29 +814,48 @@ def _plan_mock_interview_assignments(
         (date, slot_time, batch_code)).
     extended_aes: candidate pool, in the fixed order rotation follows.
     busy_by_ae: ae_email -> set of (date, start_min) the AE is themselves
-        already committed to in CMIS (their own teaching).
+        already committed to in CMIS (their own teaching) — an exact-time
+        conflict check, separate from the day-spread rule below.
     already_claimed_keys: session keys already claimed by ANYONE — skipped
         entirely, never (re)assigned.
     already_assigned_by_ae: ae_email -> set of session keys already assigned
-        to them (from a prior run or manual claim) — counts toward both the
-        weekly cap and the busy check, so we never double-book across runs.
+        to them (from a prior run or manual claim). Only the date component
+        of each key is used, to seed both the weekly cap and the
+        one-per-day rule, so re-running this after a prior run stays
+        consistent.
+    cap_per_week: upper bound on Mock Interviews per AE per ISO week.
+    working_days_only: Monday-Friday plus only the first and last Saturday
+        of each month (see _is_working_day) — every Sunday and every other
+        Saturday is excluded from candidates entirely.
+
+    Spread rule: an AE gets AT MOST ONE Mock Interview per calendar day.
+    This is what actually makes assignments "cover the week" — with
+    cap_per_week=3 and multiple working days available, day-uniqueness
+    forces those onto different days rather than letting them all land on
+    whichever day happens to have the most open slots. The only time an AE
+    gets fewer days than the cap is a genuinely short week (a partial
+    first/last week at the edge of the date range, or too few candidate
+    days available) — that's an expected consequence, not a bug to work
+    around.
 
     Returns a list of (ae_email, session_dict) pairs to write.
     """
     if not extended_aes or not sessions:
         return []
 
-    sessions_sorted = sorted(sessions, key=lambda s: (s["date"], s["start_min"]))
+    candidates = [s for s in sessions if not working_days_only or _is_working_day(s["date"])]
+    sessions_sorted = sorted(candidates, key=lambda s: (s["date"], s["start_min"]))
 
     # Running state, seeded from what's already assigned so re-running this
     # after a prior run (or after manual claims) stays consistent.
     week_count: dict[tuple[str, tuple], int] = {}
+    day_used: dict[str, set] = {ae: set() for ae in extended_aes}
     ae_times: dict[str, set[tuple]] = {ae: set(busy_by_ae.get(ae, set())) for ae in extended_aes}
     for ae, keys in already_assigned_by_ae.items():
         for k in keys:
             d = k[0]
             week_count[(ae, _iso_week(d))] = week_count.get((ae, _iso_week(d)), 0) + 1
-            ae_times.setdefault(ae, set()).add((d, k[3] if len(k) > 3 else None))
+            day_used.setdefault(ae, set()).add(d)
 
     plan: list[tuple[str, dict]] = []
     n = len(extended_aes)
@@ -833,16 +875,20 @@ def _plan_mock_interview_assignments(
                 continue
             if slot_mark in ae_times.get(ae, set()):
                 continue
+            if sess["date"] in day_used.get(ae, set()):
+                continue
             # Assign.
             plan.append((ae, sess))
             week_count[(ae, wk)] = week_count.get((ae, wk), 0) + 1
+            day_used.setdefault(ae, set()).add(sess["date"])
             ae_times.setdefault(ae, set()).add(slot_mark)
             already_claimed_keys.add(key)
             rotation_start = (rotation_start + i + 1) % n
             assigned = True
             break
-        # If no AE could take it (all capped or all conflicted), it's simply
-        # left unassigned this run — not an error, just no room this week.
+        # If no AE could take it (all capped, conflicted, or already have a
+        # Mock Interview that day), it's simply left unassigned this run —
+        # not an error, just no room this week under the spread rule.
         if not assigned:
             continue
 
@@ -866,6 +912,25 @@ def get_all_mock_interview_sessions(from_date: date, to_date: date) -> pd.DataFr
     )
     with cmis_engine().connect() as conn:
         return pd.read_sql(sql, conn, params={"a": from_date, "b": to_date})
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def ensure_mock_interviews_assigned(
+    from_date: date, to_date: date, cap_per_week: int = 3,
+) -> dict[str, Any]:
+    """Runs auto_assign_mock_interviews automatically — no admin button needed.
+
+    Cached for 10 minutes per (from_date, to_date, cap) so it doesn't re-run
+    the full allocation (which loops over every Extended AE's own CMIS slots)
+    on every single Streamlit rerun or page view within that window. The
+    underlying assignment is idempotent regardless — safe even if the cache
+    were bypassed — this just avoids doing the work needlessly often.
+
+    Call this unconditionally wherever the date range is known (Sessions tab
+    load is enough); it silently assigns in the background for every Extended
+    AE, not just whoever happens to be viewing at the time.
+    """
+    return auto_assign_mock_interviews(from_date, to_date, cap_per_week=cap_per_week)
 
 
 def auto_assign_mock_interviews(
