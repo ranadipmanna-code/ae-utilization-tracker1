@@ -1273,7 +1273,7 @@ def _sessions_tab(user, role):
                     else:
                         st.info("No changes to save.")
 
-
+    if pick_trainer != "All trainers":
         sessions = sessions[sessions["_trainer"] == pick_trainer]
     if pick_batch != "All batches":
         sessions = sessions[sessions["batch_code"] == pick_batch]
