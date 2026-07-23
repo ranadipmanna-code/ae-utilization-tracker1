@@ -1,9 +1,0 @@
-# Light base so the data grid renders light; palette tuned to the Linear-style
-# indigo theme. The in-app Light/Dark toggle restyles everything via CSS.
-[theme]
-base = "light"
-primaryColor = "#5e6ad2"
-backgroundColor = "#fbfbfc"
-secondaryBackgroundColor = "#ffffff"
-textColor = "#16181d"
-font = "sans serif"
