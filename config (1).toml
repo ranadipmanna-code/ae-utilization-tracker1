@@ -1,0 +1,20 @@
+# Streamlit's own chrome (widgets, the data grid canvas, menus) is themed here.
+# The in-app Light/Dark toggle restyles everything else via CSS, but these keys
+# drive components Streamlit renders itself and that CSS cannot reach.
+#
+# Values mirror THEMES["light"] in app.py -- keep the two in step.
+#
+# IMPORTANT: this file must live at .streamlit/config.toml. Streamlit does NOT
+# read a config.toml sitting at the repository root; when it did, base="light"
+# was silently ignored and the data grid rendered dark inside a light page.
+[theme]
+base = "light"
+primaryColor = "#ee7623"            # Anudip orange — buttons, focus, checkboxes
+backgroundColor = "#fbfaf8"         # warm paper white
+secondaryBackgroundColor = "#ffffff"
+textColor = "#14293f"               # Anudip navy ink
+font = "sans serif"
+
+[server]
+# Claims are small writes; no need for the 200 MB default.
+maxUploadSize = 10
