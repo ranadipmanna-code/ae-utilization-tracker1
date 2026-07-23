@@ -740,6 +740,238 @@ def core_ae_for_extended(extended_ae_email: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Mock Interview auto-assignment
+#
+# Every plr_mi1 / plr_mi2 / plr_mi_save row in CMIS already belongs to a real
+# trainer running that interview — there's no "unassigned demand" to pull
+# from (verified against live CMIS: all ~700+ such rows carry a real
+# email_id). What this feature does instead is pre-select a handful of those
+# EXISTING sessions, system-wide across all trainers (not just a given
+# Extended AE's own pod), as things for a specific Extended AE to go observe
+# / evaluate — written the same way a manual claim is, via
+# upsert_selection_for_role, so the person can freely unselect it afterwards.
+#
+# Design, made explicit here because it was the least-specified part of the
+# request:
+#   - Candidate pool: every CMIS row this week/date-range with c_alias in
+#     MOCK_INTERVIEW_ALIASES, from ANY trainer.
+#   - Cap: at most `cap_per_week` (default 3) auto-assignments per Extended
+#     AE per ISO calendar week — "2-3 per week" from the spec.
+#   - No double-booking: an AE is never assigned a slot that overlaps either
+#     (a) their OWN CMIS teaching commitments, or (b) a slot they're already
+#     assigned/claimed (auto or manual) elsewhere in this run.
+#   - No stepping on existing claims: a session already claimed by ANYONE
+#     (any status other than absent/"Not Selected") is left alone.
+#   - Deterministic, not random: AEs rotate in a fixed (sorted) order and
+#     sessions are processed in date/time order, so re-running the exact same
+#     inputs produces the exact same plan — important since this can be
+#     re-run after CMIS data shifts.
+# ---------------------------------------------------------------------------
+MOCK_INTERVIEW_ALIASES = ("plr_mi1", "plr_mi2", "plr_mi_save")
+
+
+def _iso_week(d: date) -> tuple[int, int]:
+    iso = d.isocalendar()
+    return (iso[0], iso[1])
+
+
+def _plan_mock_interview_assignments(
+    sessions: list[dict],
+    extended_aes: list[str],
+    busy_by_ae: dict[str, set[tuple]],
+    already_claimed_keys: set[tuple],
+    already_assigned_by_ae: dict[str, set[tuple]],
+    cap_per_week: int = 3,
+) -> list[tuple[str, dict]]:
+    """Pure allocation logic — no DB access, so this is fully unit-testable.
+
+    sessions: each dict has at least "date" (date), "start_min" (int,
+        minutes since midnight), "key" (a hashable session identity, e.g.
+        (date, slot_time, batch_code)).
+    extended_aes: candidate pool, in the fixed order rotation follows.
+    busy_by_ae: ae_email -> set of (date, start_min) the AE is themselves
+        already committed to in CMIS (their own teaching).
+    already_claimed_keys: session keys already claimed by ANYONE — skipped
+        entirely, never (re)assigned.
+    already_assigned_by_ae: ae_email -> set of session keys already assigned
+        to them (from a prior run or manual claim) — counts toward both the
+        weekly cap and the busy check, so we never double-book across runs.
+
+    Returns a list of (ae_email, session_dict) pairs to write.
+    """
+    if not extended_aes or not sessions:
+        return []
+
+    sessions_sorted = sorted(sessions, key=lambda s: (s["date"], s["start_min"]))
+
+    # Running state, seeded from what's already assigned so re-running this
+    # after a prior run (or after manual claims) stays consistent.
+    week_count: dict[tuple[str, tuple], int] = {}
+    ae_times: dict[str, set[tuple]] = {ae: set(busy_by_ae.get(ae, set())) for ae in extended_aes}
+    for ae, keys in already_assigned_by_ae.items():
+        for k in keys:
+            d = k[0]
+            week_count[(ae, _iso_week(d))] = week_count.get((ae, _iso_week(d)), 0) + 1
+            ae_times.setdefault(ae, set()).add((d, k[3] if len(k) > 3 else None))
+
+    plan: list[tuple[str, dict]] = []
+    n = len(extended_aes)
+    rotation_start = 0
+
+    for sess in sessions_sorted:
+        key = sess["key"]
+        if key in already_claimed_keys:
+            continue
+        wk = _iso_week(sess["date"])
+        slot_mark = (sess["date"], sess["start_min"])
+
+        assigned = False
+        for i in range(n):
+            ae = extended_aes[(rotation_start + i) % n]
+            if week_count.get((ae, wk), 0) >= cap_per_week:
+                continue
+            if slot_mark in ae_times.get(ae, set()):
+                continue
+            # Assign.
+            plan.append((ae, sess))
+            week_count[(ae, wk)] = week_count.get((ae, wk), 0) + 1
+            ae_times.setdefault(ae, set()).add(slot_mark)
+            already_claimed_keys.add(key)
+            rotation_start = (rotation_start + i + 1) % n
+            assigned = True
+            break
+        # If no AE could take it (all capped or all conflicted), it's simply
+        # left unassigned this run — not an error, just no room this week.
+        if not assigned:
+            continue
+
+    return plan
+
+
+def get_all_mock_interview_sessions(from_date: date, to_date: date) -> pd.DataFrame:
+    """Every CMIS row in the range whose c_alias is a Mock Interview alias,
+    from ANY trainer system-wide — the candidate pool auto-assignment draws
+    from. Read-only, same as every other CMIS query."""
+    alias_list = "','".join(a.lower() for a in MOCK_INTERVIEW_ALIASES)
+    sql = text(
+        f"""
+        SELECT s_date, c_alias, slot_time, batch_code, email_id, f_name,
+               l_name, program_name, m_code
+        FROM {CMIS_VIEW}
+        WHERE LOWER(c_alias) IN ('{alias_list}')
+          AND s_date BETWEEN :a AND :b
+        ORDER BY s_date, slot_time
+        """
+    )
+    with cmis_engine().connect() as conn:
+        return pd.read_sql(sql, conn, params={"a": from_date, "b": to_date})
+
+
+def auto_assign_mock_interviews(
+    from_date: date, to_date: date, cap_per_week: int = 3, assigned_by: str | None = None,
+) -> dict[str, Any]:
+    """Run the allocation and write results as 'Selected' claims via the same
+    upsert_selection_for_role path a manual claim uses — so the person can
+    unselect it exactly like any other claim. Returns a summary dict."""
+    cmis_rows = get_all_mock_interview_sessions(from_date, to_date)
+    aes = all_extended_aes()
+    if cmis_rows.empty or not aes:
+        return {"assigned": 0, "candidates": 0, "by_ae": {}}
+
+    sessions = []
+    for _, r in cmis_rows.iterrows():
+        d = pd.to_datetime(r["s_date"]).date()
+        start_min = _parse_slot_start_minutes_db(r["slot_time"])
+        key = (d, r["slot_time"], r["batch_code"])
+        sessions.append({
+            "date": d, "start_min": start_min, "key": key,
+            "slot_time": r["slot_time"], "batch_code": r["batch_code"],
+            "c_alias": r["c_alias"],
+        })
+
+    existing = get_selections_for_role("extended_ae", None, from_date, to_date)
+    already_claimed_keys: set[tuple] = set()
+    already_assigned_by_ae: dict[str, set[tuple]] = {}
+    if not existing.empty:
+        for _, r in existing.iterrows():
+            if str(r["status"]) in ("Not Selected", "", "None") or r["status"] is None:
+                continue
+            d = pd.to_datetime(r["session_date"]).date()
+            k = (d, r["slot_time"], r["batch_code"])
+            already_claimed_keys.add(k)
+            if r["owner_email"] in aes:
+                already_assigned_by_ae.setdefault(r["owner_email"], set()).add(k)
+
+    busy_by_ae: dict[str, set[tuple]] = {}
+    for ae in aes:
+        own = get_member_own_slots(ae, from_date, to_date)
+        times = set()
+        if not own.empty:
+            for _, r in own.iterrows():
+                d = pd.to_datetime(r["s_date"]).date()
+                times.add((d, _parse_slot_start_minutes_db(r["slot_time"])))
+        busy_by_ae[ae] = times
+
+    plan = _plan_mock_interview_assignments(
+        sessions, sorted(aes), busy_by_ae, already_claimed_keys,
+        already_assigned_by_ae, cap_per_week,
+    )
+
+    by_ae: dict[str, int] = {}
+    for ae, sess in plan:
+        upsert_selection_for_role(
+            "extended_ae", ae, sess["date"], sess["slot_time"],
+            sess["c_alias"], sess["batch_code"], "Selected",
+        )
+        by_ae[ae] = by_ae.get(ae, 0) + 1
+
+    return {"assigned": len(plan), "candidates": len(sessions), "by_ae": by_ae}
+
+
+def _parse_slot_start_minutes_db(slot: str) -> int:
+    """DB-side twin of app.py's _slot_start_minutes — kept here too so
+    allocation logic doesn't depend on importing the UI module."""
+    if not slot or "-" not in str(slot):
+        return 10**6
+    try:
+        start = str(slot).split("-", 1)[0].strip()
+        t = pd.to_datetime(start, format="%I:%M %p")
+        return t.hour * 60 + t.minute
+    except Exception:
+        return 10**6
+
+
+def get_my_mock_interview_claims(extended_ae_email: str, from_date: date, to_date: date) -> pd.DataFrame:
+    """This Extended AE's own Mock Interview claims in range, with the
+    underlying CMIS trainer/program details joined back in for display.
+    Cross-pod by design — the trainer being observed doesn't have to be in
+    this AE's own core_ae_faculty_map row."""
+    sel = get_selections_for_role("extended_ae", extended_ae_email, from_date, to_date)
+    if sel.empty:
+        return sel
+    alias_set = {a.lower() for a in MOCK_INTERVIEW_ALIASES}
+    sel = sel[sel["module"].fillna("").str.lower().isin(alias_set)].copy()
+    if sel.empty:
+        return sel
+
+    cmis_rows = get_all_mock_interview_sessions(from_date, to_date)
+    if cmis_rows.empty:
+        return sel
+
+    cmis_rows = cmis_rows.copy()
+    cmis_rows["_date"] = pd.to_datetime(cmis_rows["s_date"]).dt.date
+    sel["_date"] = pd.to_datetime(sel["session_date"]).dt.date
+
+    merged = sel.merge(
+        cmis_rows,
+        left_on=["_date", "slot_time", "batch_code"],
+        right_on=["_date", "slot_time", "batch_code"],
+        how="left",
+    )
+    return merged
+
+
 def all_extended_aes() -> list[str]:
     """Every Extended AE in user_roles (used for the 'pick others' escape hatch)."""
     df = get_user_roles()
