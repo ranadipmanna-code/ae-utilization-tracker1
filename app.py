@@ -588,7 +588,11 @@ def apply_theme():
     st.markdown(_css(THEMES[st.session_state.theme], st.session_state.theme), unsafe_allow_html=True)
 
 
-STATUS_OPTIONS = ["Not Selected", "Choosing", "Selected", "Confirmed"]
+STATUS_OPTIONS = ["Not Selected", "Selected"]
+# "Choosing" and "Confirmed" are no longer offered as picks, but stay valid
+# values: existing rows saved under the old 4-option flow keep working, and
+# _status_badge()/CLAIMED below still recognise them for display and claim
+# counting. Only the pick list shown to the user has shrunk.
 CLAIMED = {"Selected", "Confirmed"}
 
 
@@ -1002,27 +1006,15 @@ def _calendar_tab(user, role):
     is_editable = member_email.lower() == user["email"].lower()
     member_role = db.role_for_email(member_email) or role
 
-    # Offsets in weeks from the current week. Fixed labels for the four weeks
-    # closest to today; beyond that, the label is just the date range, since
-    # "Last/This/Next/Week after" doesn't scale. -4..+20 covers roughly a
-    # month back and five months forward — wide enough to reach any CMIS slot
-    # we've seen (the furthest-out plr_* data currently runs to late November).
-    _WEEK_LABELS = {-1: "Last week", 0: "This week", 1: "Next week", 2: "Week after"}
-
-    def _week_label(offset: int) -> str:
-        if offset in _WEEK_LABELS:
-            return _WEEK_LABELS[offset]
-        mon, sun = current_week_bounds(offset)
-        return f"Week of {mon:%b %d} – {sun:%b %d}"
-
-    week_options = list(range(-4, 21))
-    wk = st.selectbox(
-        "Week", week_options, index=week_options.index(0),
-        format_func=_week_label,
-        key="cal_week",
-    )
-    ws, we = current_week_bounds(wk)
-    st.caption(f"Week of {ws} → {we}" + ("" if is_editable else "  ·  🔒 view-only (not your calendar)"))
+    # Date range comes from the Sessions tab, not an independent picker here —
+    # the two tabs are meant to always show the same window. If the Sessions
+    # tab hasn't been visited yet this session, fall back to a sensible
+    # default (today -> +13 days, matching Sessions' own first-load default)
+    # so Calendar still works standalone.
+    ws = st.session_state.get("shared_from") or date.today()
+    we = st.session_state.get("shared_to") or (date.today() + timedelta(days=13))
+    range_note = "" if is_editable else "  ·  🔒 view-only (not your calendar)"
+    st.caption(f"{ws} → {we}  ·  matches the Sessions tab date range{range_note}")
 
     with st.spinner("Fetching this member's schedule…"):
         cal = db.resolve_member_calendar(member_email, ws, we)
@@ -1204,7 +1196,84 @@ def _sessions_tab(user, role):
                  "work with the raw 30-minute slots individually.",
         )
 
-    if pick_trainer != "All trainers":
+    # Calendar tab reads these directly so both tabs always show the same
+    # window — Sessions is the source of truth here, Calendar has no
+    # independent date picker of its own.
+    st.session_state["shared_from"] = date_from
+    st.session_state["shared_to"] = date_to
+
+    if role == "admin":
+        with st.expander("🎯 Auto-assign Mock Interviews", expanded=False):
+            st.caption(
+                "Pre-selects up to a cap of plr_mi1 / plr_mi2 / plr_mi_save "
+                "sessions per Extended AE per week, from anywhere in CMIS — "
+                "written as a normal 'Selected' claim they can unselect. "
+                "Skips anything already claimed by anyone, and never "
+                "double-books an AE against their own CMIS commitments or "
+                "another auto-assigned slot. Uses the date range above."
+            )
+            cap = st.number_input("Max per Extended AE per week", min_value=1, max_value=10, value=3)
+            if st.button("Run auto-assignment for this range"):
+                with st.spinner("Assigning…"):
+                    result = db.auto_assign_mock_interviews(date_from, date_to, cap_per_week=int(cap))
+                st.cache_data.clear()
+                if result["assigned"] == 0:
+                    st.info(f"Nothing to assign ({result['candidates']} candidate sessions found, "
+                            "all already claimed or no eligible AE had room).")
+                else:
+                    per_ae = ", ".join(f"{ae.split('@')[0]}: {n}" for ae, n in result["by_ae"].items())
+                    st.success(f"Assigned {result['assigned']} of {result['candidates']} candidate "
+                               f"sessions. {per_ae}")
+
+
+    if role == "extended_ae":
+        my_mi = db.get_my_mock_interview_claims(user["email"], date_from, date_to)
+        if not my_mi.empty:
+            st.markdown("#### 🎯 My Mock Interviews")
+            st.caption(
+                "Auto-assigned Mock Interview sessions for you to observe/evaluate — "
+                "these can be from any trainer, not just your own Core AE's pod. "
+                "Unselect any you can't make."
+            )
+            with st.form("my_mi_form"):
+                mi_pending: dict[int, str] = {}
+                for _, r in my_mi.sort_values(["_date", "slot_time"]).iterrows():
+                    trainer = f"{r.get('f_name') or ''} {r.get('l_name') or ''}".strip() or "Unknown trainer"
+                    day_lbl = pd.to_datetime(r["_date"]).strftime("%a, %d %b")
+                    cA, cB = st.columns([4, 1.3])
+                    with cA:
+                        st.markdown(
+                            f"<div class='scard scard-mine'>"
+                            f"<div class='scard-top'>🕑 {day_lbl} · {r['slot_time']}</div>"
+                            f"<div class='scard-sub'>{trainer} · {r.get('batch_code') or ''} · "
+                            f"{r.get('c_alias') or ''} · {r.get('program_name') or ''}</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                    with cB:
+                        mi_opts = ["Selected", "Not Selected"]
+                        cur = r["status"] if r["status"] in mi_opts else "Selected"
+                        choice = st.selectbox(
+                            "status", mi_opts, index=mi_opts.index(cur),
+                            key=f"mi_{r['id']}", label_visibility="collapsed",
+                        )
+                        if choice != cur:
+                            mi_pending[r["id"]] = choice
+                if st.form_submit_button("💾  Save my Mock Interview choices", type="primary"):
+                    for _id, new_status in mi_pending.items():
+                        row = my_mi[my_mi["id"] == _id].iloc[0]
+                        db.upsert_selection_for_role(
+                            "extended_ae", user["email"], row["session_date"],
+                            row["slot_time"], row["module"], row["batch_code"], new_status,
+                        )
+                    if mi_pending:
+                        st.cache_data.clear()
+                        st.success(f"Updated {len(mi_pending)} Mock Interview selection"
+                                   f"{'s' if len(mi_pending) != 1 else ''}.")
+                        st.rerun()
+                    else:
+                        st.info("No changes to save.")
+
+
         sessions = sessions[sessions["_trainer"] == pick_trainer]
     if pick_batch != "All batches":
         sessions = sessions[sessions["batch_code"] == pick_batch]
@@ -1600,12 +1669,26 @@ def _sessions_table(sessions, core_ae_email, date_from, date_to, role, user_emai
                     )
                 with cB:
                     if can_select and editable:
+                        # Legacy rows saved as "Choosing"/"Confirmed" under the
+                        # old 4-option flow aren't in STATUS_OPTIONS anymore.
+                        # Compare against what the widget actually SHOWS
+                        # (displayed_status), not the raw DB value — otherwise
+                        # an untouched legacy row looks like a change the user
+                        # never made, and Save would silently downgrade a
+                        # Confirmed session to Selected.
+                        if status in STATUS_OPTIONS:
+                            default_idx = STATUS_OPTIONS.index(status)
+                        elif status in CLAIMED:
+                            default_idx = STATUS_OPTIONS.index("Selected")
+                        else:
+                            default_idx = 0
+                        displayed_status = STATUS_OPTIONS[default_idx]
                         sel = st.selectbox(
                             "status", STATUS_OPTIONS,
-                            index=STATUS_OPTIONS.index(status) if status in STATUS_OPTIONS else 0,
+                            index=default_idx,
                             key=f"st_{key}_{page}", label_visibility="collapsed",
                         )
-                        if sel != status:
+                        if sel != displayed_status:
                             pending[key] = (sel, r)
                     else:
                         st.markdown(
