@@ -934,6 +934,62 @@ def _calendar_members_for(user, role) -> list[tuple[str, str]]:
     return opts
 
 
+def _slot_end_minutes(slot: str) -> int:
+    """Minutes-since-midnight for a slot's END, e.g. '11:00 AM - 11:30 AM' -> 690.
+    Companion to _slot_start_minutes; used to detect back-to-back runs."""
+    if not slot or "-" not in str(slot):
+        return -1
+    try:
+        end = str(slot).split("-", 1)[1].strip()
+        t = pd.to_datetime(end, format="%I:%M %p")
+        return t.hour * 60 + t.minute
+    except Exception:
+        return -1
+
+
+def _merge_calendar_runs(grp: pd.DataFrame) -> list[dict]:
+    """Collapse a day's slots into contiguous same-task runs for display.
+
+    Two rows merge only when ALL of these hold: back-to-back in time (one
+    slot's end == the next one's start), same batch_code, same c_alias, same
+    *current* task_type, and — if the task is 'other' — the same note. Same
+    c_alias also guarantees the same default_task, so a merged card's "clear
+    override" behaviour stays correct for every slot underneath it.
+
+    Deliberately NOT merged across a c_alias change even when the task_type
+    happens to match (e.g. plr_mi1 followed by plr_mi2, both Mock Interview):
+    keeping them separate preserves each slot's own default for the "reset to
+    CMIS default" path, and avoids silently combining two different interview
+    rounds into one card.
+
+    Returns a list of dicts, each with the merged slot_time string, the
+    representative row's fields, and `_members`: the original rows (as Series)
+    that make up the run, in order — used when saving to fan the write across
+    every real slot.
+    """
+    rows = [r for _, r in grp.iterrows()]
+    runs: list[dict] = []
+    for r in rows:
+        if runs:
+            prev = runs[-1]
+            same_group = (
+                r.get("batch_code") == prev["_rep"].get("batch_code")
+                and r.get("c_alias") == prev["_rep"].get("c_alias")
+                and r["task_type"] == prev["_rep"]["task_type"]
+                and (r["task_type"] != "other"
+                     or (r.get("other_note") or "") == (prev["_rep"].get("other_note") or ""))
+            )
+            contiguous = _slot_end_minutes(prev["_members"][-1]["slot_time"]) == _slot_start_minutes(r["slot_time"])
+            if same_group and contiguous:
+                prev["_members"].append(r)
+                start = str(prev["_members"][0]["slot_time"]).split("-", 1)[0].strip()
+                end = str(r["slot_time"]).split("-", 1)[1].strip()
+                prev["slot_time"] = f"{start} - {end}"
+                continue
+        runs.append({"_rep": r, "_members": [r], "slot_time": r["slot_time"]})
+    return runs
+
+
 def _calendar_tab(user, role):
     st.markdown("### 📅 Calendar — CMIS task defaults & assignment")
 
@@ -993,7 +1049,8 @@ def _calendar_tab(user, role):
                 f"<span class='slot-count'>{len(grp)} slot{'s' if len(grp)!=1 else ''}</span></div>",
                 unsafe_allow_html=True,
             )
-            for _, r in grp.iterrows():
+            for card in _merge_calendar_runs(grp):
+                r = card["_rep"]
                 task = r["task_type"]
                 css = _task_css(task)
                 sub_bits = [_txt_safe(r.get("batch_code")), _txt_safe(r.get("c_alias")),
@@ -1006,14 +1063,14 @@ def _calendar_tab(user, role):
                 with cA:
                     st.markdown(
                         f"""<div class="tcard tcard-{css}">
-                          <div class="tcard-top">🕑 {r['slot_time']}
+                          <div class="tcard-top">🕑 {card['slot_time']}
                             <span class="tchip tchip-{css}">{db.TASK_LABELS.get(task, task)}</span></div>
                           <div class="tcard-sub">{sub_line}</div>
                         </div>""",
                         unsafe_allow_html=True,
                     )
                 with cB:
-                    key = f"{r['_date']}|{r['slot_time']}"
+                    key = f"{r['_date']}|{card['_members'][0]['slot_time']}"
                     if task == "evaluation":
                         st.markdown(
                             "<div class='locked-status'>🔒 via Evaluation<br>"
@@ -1041,7 +1098,7 @@ def _calendar_tab(user, role):
                                 placeholder="What kind of task?",
                             )
                         if choice != task or (choice == "other" and note != (r.get("other_note") or "")):
-                            pending[key] = (choice, note, r)
+                            pending[key] = (choice, note, card["_members"])
                     else:
                         st.markdown(f"<div class='locked-status'>{db.TASK_LABELS.get(task, task)}</div>",
                                     unsafe_allow_html=True)
@@ -1053,14 +1110,24 @@ def _calendar_tab(user, role):
         if not pending:
             st.info("No changes to save.")
         else:
-            for _, (new_task, note, r) in pending.items():
-                db.set_slot_task(
-                    member_email, member_role, r["_date"], r["slot_time"],
-                    r.get("slot_name"), new_task, other_note=note, set_by=user["email"],
-                    default_task=r.get("default_task"),
-                )
+            n_slots = 0
+            for _, (new_task, note, members) in pending.items():
+                # A merged card writes to EVERY 30-min slot it spans, so the
+                # DB ends up identical to changing each slot by hand. Each
+                # member keeps its own slot_time/slot_name/default_task, since
+                # merging never crosses a c_alias boundary (see
+                # _merge_calendar_runs) — but being explicit here is cheap
+                # insurance against that ever changing.
+                for m in members:
+                    db.set_slot_task(
+                        member_email, member_role, m["_date"], m["slot_time"],
+                        m.get("slot_name"), new_task, other_note=note, set_by=user["email"],
+                        default_task=m.get("default_task"),
+                    )
+                    n_slots += 1
             st.cache_data.clear()
-            st.success(f"Saved {len(pending)} change{'s' if len(pending) != 1 else ''}.")
+            st.success(f"Saved {n_slots} slot{'s' if n_slots != 1 else ''} across "
+                       f"{len(pending)} card{'s' if len(pending) != 1 else ''}.")
             st.rerun()
 
 
