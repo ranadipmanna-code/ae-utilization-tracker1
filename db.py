@@ -798,44 +798,78 @@ def _iso_week(d: date) -> tuple[int, int]:
     return (iso[0], iso[1])
 
 
+def _tier_cap_for_busy_days(busy_days: int, working_days: int) -> int:
+    """Map how booked an Extended AE's week already is to a Mock Interview cap
+    for that week, per spec:
+        - fully free week                -> up to 5
+        - some commitments, room left    -> 2-3, scaled by how much is free
+        - week is very much booked up    -> 0 (don't assign at all)
+
+    'busy' here means the AE's OWN CMIS teaching hours plus their OWN
+    claimed evaluation sessions for that week — not prior Mock Interview
+    assignments, which are governed separately by day-uniqueness and the cap
+    this function returns.
+    """
+    if working_days <= 0:
+        return 0
+    free_days = working_days - busy_days
+    if busy_days == 0:
+        return 5
+    if free_days <= 0:
+        return 0
+    if free_days == 1:
+        return 2
+    if free_days in (2, 3):
+        return free_days
+    return 5  # 4+ free days even with a stray commitment -> effectively free
+
+
 def _plan_mock_interview_assignments(
     sessions: list[dict],
     extended_aes: list[str],
     busy_by_ae: dict[str, set[tuple]],
     already_claimed_keys: set[tuple],
     already_assigned_by_ae: dict[str, set[tuple]],
-    cap_per_week: int = 3,
+    cap_per_week: int = 2,
     working_days_only: bool = True,
+    week_cap: dict[tuple[str, tuple], int] | None = None,
 ) -> list[tuple[str, dict]]:
-    """Pure allocation logic — no DB access, so this is fully unit-testable.
+    """Pure allocation logic -- no DB access, so this is fully unit-testable.
 
     sessions: each dict has at least "date" (date), "start_min" (int,
         minutes since midnight), "key" (a hashable session identity, e.g.
         (date, slot_time, batch_code)).
     extended_aes: candidate pool, in the fixed order rotation follows.
     busy_by_ae: ae_email -> set of (date, start_min) the AE is themselves
-        already committed to in CMIS (their own teaching) — an exact-time
+        already committed to in CMIS (their own teaching) -- an exact-time
         conflict check, separate from the day-spread rule below.
-    already_claimed_keys: session keys already claimed by ANYONE — skipped
+    already_claimed_keys: session keys already claimed by ANYONE -- skipped
         entirely, never (re)assigned.
     already_assigned_by_ae: ae_email -> set of session keys already assigned
         to them (from a prior run or manual claim). Only the date component
         of each key is used, to seed both the weekly cap and the
         one-per-day rule, so re-running this after a prior run stays
         consistent.
-    cap_per_week: upper bound on Mock Interviews per AE per ISO week.
+    cap_per_week: fallback upper bound on Mock Interviews per AE per ISO
+        week, used only when week_cap doesn't have an entry for that
+        (ae, week) pair.
     working_days_only: Monday-Friday plus only the first and last Saturday
-        of each month (see _is_working_day) — every Sunday and every other
+        of each month (see _is_working_day) -- every Sunday and every other
         Saturday is excluded from candidates entirely.
+    week_cap: optional {(ae_email, iso_week): cap} overriding cap_per_week
+        per person per week -- this is how the busyness-tiered cap (see
+        _tier_cap_for_busy_days) actually takes effect. A cap of 0 for a
+        given (ae, week) means that AE gets nothing at all that week,
+        which is exactly the "very much scheduled busy -> skip" rule.
 
     Spread rule: an AE gets AT MOST ONE Mock Interview per calendar day.
-    This is what actually makes assignments "cover the week" — with
-    cap_per_week=3 and multiple working days available, day-uniqueness
-    forces those onto different days rather than letting them all land on
+    This is what actually makes assignments "cover the week" -- with a
+    small cap and multiple working days available, day-uniqueness forces
+    those onto different days rather than letting them all land on
     whichever day happens to have the most open slots. The only time an AE
     gets fewer days than the cap is a genuinely short week (a partial
     first/last week at the edge of the date range, or too few candidate
-    days available) — that's an expected consequence, not a bug to work
+    days available) -- that's an expected consequence, not a bug to work
     around.
 
     Returns a list of (ae_email, session_dict) pairs to write.
@@ -843,6 +877,7 @@ def _plan_mock_interview_assignments(
     if not extended_aes or not sessions:
         return []
 
+    week_cap = week_cap or {}
     candidates = [s for s in sessions if not working_days_only or _is_working_day(s["date"])]
     sessions_sorted = sorted(candidates, key=lambda s: (s["date"], s["start_min"]))
 
@@ -871,7 +906,10 @@ def _plan_mock_interview_assignments(
         assigned = False
         for i in range(n):
             ae = extended_aes[(rotation_start + i) % n]
-            if week_count.get((ae, wk), 0) >= cap_per_week:
+            cap = week_cap.get((ae, wk), cap_per_week)
+            if cap <= 0:
+                continue
+            if week_count.get((ae, wk), 0) >= cap:
                 continue
             if slot_mark in ae_times.get(ae, set()):
                 continue
@@ -886,9 +924,9 @@ def _plan_mock_interview_assignments(
             rotation_start = (rotation_start + i + 1) % n
             assigned = True
             break
-        # If no AE could take it (all capped, conflicted, or already have a
-        # Mock Interview that day), it's simply left unassigned this run —
-        # not an error, just no room this week under the spread rule.
+        # If no AE could take it (all capped, conflicted, already have a
+        # Mock Interview that day, or their week is too busy per week_cap),
+        # it's simply left unassigned this run -- not an error.
         if not assigned:
             continue
 
@@ -916,7 +954,7 @@ def get_all_mock_interview_sessions(from_date: date, to_date: date) -> pd.DataFr
 
 @st.cache_data(ttl=600, show_spinner=False)
 def ensure_mock_interviews_assigned(
-    from_date: date, to_date: date, cap_per_week: int = 3,
+    from_date: date, to_date: date, cap_per_week: int = 2,
 ) -> dict[str, Any]:
     """Runs auto_assign_mock_interviews automatically — no admin button needed.
 
@@ -1018,7 +1056,7 @@ def get_mock_interview_assignments(
 
 
 def auto_assign_mock_interviews(
-    from_date: date, to_date: date, cap_per_week: int = 3, assigned_by: str | None = None,
+    from_date: date, to_date: date, cap_per_week: int = 2, assigned_by: str | None = None,
 ) -> dict[str, Any]:
     """Run the allocation and write results into the dedicated
     mock_interview_assignment table -- a normal 'Selected' row the person can
@@ -1059,18 +1097,51 @@ def auto_assign_mock_interviews(
                 already_assigned_by_ae.setdefault(r["extended_ae_email"], set()).add(k)
 
     busy_by_ae: dict[str, set[tuple]] = {}
+    busy_days_by_ae: dict[str, set[date]] = {}
+    _claimed_like = {"Selected", "Confirmed", "Choosing"}
     for ae in aes:
         own = get_member_own_slots(ae, from_date, to_date)
         times = set()
+        days = set()
         if not own.empty:
             for _, r in own.iterrows():
                 d = pd.to_datetime(r["s_date"]).date()
                 times.add((d, _parse_slot_start_minutes_db(r["slot_time"])))
+                days.add(d)
         busy_by_ae[ae] = times
+
+        # Also count the AE's own claimed evaluation sessions as "busy" for
+        # the purpose of the weekly cap -- someone with a full teaching-
+        # observation schedule that week shouldn't get piled onto with Mock
+        # Interviews on top, even if none of it conflicts down to the exact
+        # minute with a specific candidate slot.
+        own_claims = get_selections_for_role("extended_ae", ae, from_date, to_date)
+        if not own_claims.empty:
+            for _, r in own_claims.iterrows():
+                if str(r["status"]) in _claimed_like:
+                    days.add(pd.to_datetime(r["session_date"]).date())
+        busy_days_by_ae[ae] = days
+
+    # Tiered weekly cap per spec: a fully free week can take up to 5, a
+    # partially busy one gets 2-3 depending on how much room is actually
+    # left, and a week that's very much already scheduled gets 0 -- no Mock
+    # Interviews piled onto someone who has no real room for them.
+    weeks_present = sorted({_iso_week(s["date"]) for s in sessions})
+    week_cap: dict[tuple[str, tuple], int] = {}
+    for ae in aes:
+        b_days = busy_days_by_ae.get(ae, set())
+        for wk in weeks_present:
+            year, week_no = wk
+            monday = date.fromisocalendar(year, week_no, 1)
+            week_days = [monday + timedelta(days=i) for i in range(7)]
+            working_days_list = [d for d in week_days if _is_working_day(d)]
+            working_days = len(working_days_list)
+            busy_count = sum(1 for d in working_days_list if d in b_days)
+            week_cap[(ae, wk)] = _tier_cap_for_busy_days(busy_count, working_days)
 
     plan = _plan_mock_interview_assignments(
         sessions, sorted(aes), busy_by_ae, already_claimed_keys,
-        already_assigned_by_ae, cap_per_week,
+        already_assigned_by_ae, cap_per_week, week_cap=week_cap,
     )
 
     by_ae: dict[str, int] = {}
@@ -1192,6 +1263,46 @@ def get_visible_selections(role: str, email: str, from_date: date, to_date: date
 # selection (owner_email) may change it.
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=30, show_spinner=False)
+def get_team_extended_ae_activity(
+    core_ae_email: str, from_date: date, to_date: date,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Both Session (evaluation) claims AND Mock Interview assignments from
+    THIS Core AE's own Extended AE team only — scoped via
+    extended_aes_for_core, not system-wide. Returns (sessions_df, mi_df).
+
+    Unlike get_team_selections below, this does not collapse/dedupe rows
+    across AEs — the point here is a full activity list per person, not a
+    single "who owns this slot" lookup.
+    """
+    ext_aes = extended_aes_for_core(core_ae_email)
+    if not ext_aes:
+        empty_sessions = pd.DataFrame(
+            columns=["id", "owner_email", "session_date", "slot_time",
+                     "module", "batch_code", "status"]
+        )
+        empty_mi = pd.DataFrame(
+            columns=["id", "extended_ae_email", "session_date", "slot_time",
+                     "batch_code", "c_alias", "trainer_email", "trainer_name",
+                     "program_name", "status", "source"]
+        )
+        return empty_sessions, empty_mi
+
+    sess_frames = []
+    for ext in ext_aes:
+        s = get_selections_for_role("extended_ae", ext, from_date, to_date)
+        if not s.empty:
+            sess_frames.append(s)
+    sessions = (pd.concat(sess_frames, ignore_index=True) if sess_frames
+                else pd.DataFrame(columns=["id", "owner_email", "session_date",
+                                            "slot_time", "module", "batch_code", "status"]))
+
+    mi = get_mock_interview_assignments(None, from_date, to_date)
+    if not mi.empty:
+        mi = mi[mi["extended_ae_email"].isin(ext_aes)].copy()
+
+    return sessions, mi
+
+
 def get_team_selections(core_ae_email: str, from_date: date, to_date: date) -> pd.DataFrame:
     """
     Every selection tied to this Core AE's team for the period, from BOTH
