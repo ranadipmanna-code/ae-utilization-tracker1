@@ -933,18 +933,103 @@ def ensure_mock_interviews_assigned(
     return auto_assign_mock_interviews(from_date, to_date, cap_per_week=cap_per_week)
 
 
+MOCK_INTERVIEW_TABLE = "mock_interview_assignment"
+
+
+def upsert_mock_interview_assignment(
+    extended_ae_email: str,
+    session_date: date,
+    slot_time: str,
+    batch_code: str | None,
+    c_alias: str,
+    trainer_email: str | None = None,
+    trainer_name: str | None = None,
+    program_name: str | None = None,
+    status: str = "Selected",
+    source: str = "auto",
+) -> None:
+    """Write one row to the dedicated mock_interview_assignment table.
+
+    Uses INSERT ... ON DUPLICATE KEY UPDATE against the table's UNIQUE KEY
+    (extended_ae_email, session_date, slot_time, batch_code) -- so re-running
+    the auto-assignment, or a person toggling their own status, is always an
+    upsert, never a duplicate row.
+    """
+    with app_engine().begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO {MOCK_INTERVIEW_TABLE}
+                    (extended_ae_email, session_date, slot_time, batch_code,
+                     c_alias, trainer_email, trainer_name, program_name,
+                     status, source)
+                VALUES
+                    (:ae, :d, :st, :bc, :ca, :te, :tn, :pn, :status, :source)
+                ON DUPLICATE KEY UPDATE
+                    c_alias = VALUES(c_alias),
+                    trainer_email = VALUES(trainer_email),
+                    trainer_name = VALUES(trainer_name),
+                    program_name = VALUES(program_name),
+                    status = VALUES(status),
+                    source = VALUES(source),
+                    updated_on = NOW()
+                """
+            ),
+            {
+                "ae": extended_ae_email, "d": session_date, "st": slot_time,
+                "bc": batch_code, "ca": c_alias, "te": trainer_email,
+                "tn": trainer_name, "pn": program_name, "status": status,
+                "source": source,
+            },
+        )
+
+
+def get_mock_interview_assignments(
+    extended_ae_email: str | None, from_date: date, to_date: date,
+) -> pd.DataFrame:
+    """Rows from the dedicated table for the range. Pass extended_ae_email
+    to scope to one person, or None for everyone (used by the allocator to
+    see what's already assigned system-wide)."""
+    where = "session_date BETWEEN :a AND :b"
+    params: dict[str, Any] = {"a": from_date, "b": to_date}
+    if extended_ae_email:
+        where += " AND extended_ae_email = :ae"
+        params["ae"] = extended_ae_email
+    sql = text(
+        f"""
+        SELECT id, extended_ae_email, session_date, slot_time, batch_code,
+               c_alias, trainer_email, trainer_name, program_name, status,
+               source, assigned_on, updated_on
+        FROM {MOCK_INTERVIEW_TABLE}
+        WHERE {where}
+        """
+    )
+    try:
+        with app_engine().connect() as conn:
+            return pd.read_sql(sql, conn, params=params)
+    except Exception:
+        # Table not created yet on this environment -- behave as if empty
+        # rather than crashing the whole Sessions tab over a missing table.
+        return pd.DataFrame(columns=[
+            "id", "extended_ae_email", "session_date", "slot_time", "batch_code",
+            "c_alias", "trainer_email", "trainer_name", "program_name", "status",
+            "source", "assigned_on", "updated_on",
+        ])
+
+
 def auto_assign_mock_interviews(
     from_date: date, to_date: date, cap_per_week: int = 3, assigned_by: str | None = None,
 ) -> dict[str, Any]:
-    """Run the allocation and write results as 'Selected' claims via the same
-    upsert_selection_for_role path a manual claim uses — so the person can
-    unselect it exactly like any other claim. Returns a summary dict."""
+    """Run the allocation and write results into the dedicated
+    mock_interview_assignment table -- a normal 'Selected' row the person can
+    flip to 'Not Selected' exactly like any other claim. Returns a summary."""
     cmis_rows = get_all_mock_interview_sessions(from_date, to_date)
     aes = all_extended_aes()
     if cmis_rows.empty or not aes:
         return {"assigned": 0, "candidates": 0, "by_ae": {}}
 
     sessions = []
+    trainer_info: dict[tuple, dict] = {}
     for _, r in cmis_rows.iterrows():
         d = pd.to_datetime(r["s_date"]).date()
         start_min = _parse_slot_start_minutes_db(r["slot_time"])
@@ -954,19 +1039,24 @@ def auto_assign_mock_interviews(
             "slot_time": r["slot_time"], "batch_code": r["batch_code"],
             "c_alias": r["c_alias"],
         })
+        trainer_info[key] = {
+            "trainer_email": r["email_id"],
+            "trainer_name": f"{r.get('f_name') or ''} {r.get('l_name') or ''}".strip(),
+            "program_name": r.get("program_name"),
+        }
 
-    existing = get_selections_for_role("extended_ae", None, from_date, to_date)
+    existing = get_mock_interview_assignments(None, from_date, to_date)
     already_claimed_keys: set[tuple] = set()
     already_assigned_by_ae: dict[str, set[tuple]] = {}
     if not existing.empty:
         for _, r in existing.iterrows():
-            if str(r["status"]) in ("Not Selected", "", "None") or r["status"] is None:
+            if str(r["status"]) != "Selected":
                 continue
             d = pd.to_datetime(r["session_date"]).date()
             k = (d, r["slot_time"], r["batch_code"])
             already_claimed_keys.add(k)
-            if r["owner_email"] in aes:
-                already_assigned_by_ae.setdefault(r["owner_email"], set()).add(k)
+            if r["extended_ae_email"] in aes:
+                already_assigned_by_ae.setdefault(r["extended_ae_email"], set()).add(k)
 
     busy_by_ae: dict[str, set[tuple]] = {}
     for ae in aes:
@@ -985,9 +1075,11 @@ def auto_assign_mock_interviews(
 
     by_ae: dict[str, int] = {}
     for ae, sess in plan:
-        upsert_selection_for_role(
-            "extended_ae", ae, sess["date"], sess["slot_time"],
-            sess["c_alias"], sess["batch_code"], "Selected",
+        info = trainer_info.get(sess["key"], {})
+        upsert_mock_interview_assignment(
+            ae, sess["date"], sess["slot_time"], sess["batch_code"],
+            sess["c_alias"], info.get("trainer_email"), info.get("trainer_name"),
+            info.get("program_name"), status="Selected", source="auto",
         )
         by_ae[ae] = by_ae.get(ae, 0) + 1
 
@@ -995,7 +1087,7 @@ def auto_assign_mock_interviews(
 
 
 def _parse_slot_start_minutes_db(slot: str) -> int:
-    """DB-side twin of app.py's _slot_start_minutes — kept here too so
+    """DB-side twin of app.py's _slot_start_minutes -- kept here too so
     allocation logic doesn't depend on importing the UI module."""
     if not slot or "-" not in str(slot):
         return 10**6
@@ -1008,34 +1100,22 @@ def _parse_slot_start_minutes_db(slot: str) -> int:
 
 
 def get_my_mock_interview_claims(extended_ae_email: str, from_date: date, to_date: date) -> pd.DataFrame:
-    """This Extended AE's own Mock Interview claims in range, with the
-    underlying CMIS trainer/program details joined back in for display.
-    Cross-pod by design — the trainer being observed doesn't have to be in
-    this AE's own core_ae_faculty_map row."""
-    sel = get_selections_for_role("extended_ae", extended_ae_email, from_date, to_date)
-    if sel.empty:
-        return sel
-    alias_set = {a.lower() for a in MOCK_INTERVIEW_ALIASES}
-    sel = sel[sel["module"].fillna("").str.lower().isin(alias_set)].copy()
-    if sel.empty:
-        return sel
-
-    cmis_rows = get_all_mock_interview_sessions(from_date, to_date)
-    if cmis_rows.empty:
-        return sel
-
-    cmis_rows = cmis_rows.copy()
-    cmis_rows["_date"] = pd.to_datetime(cmis_rows["s_date"]).dt.date
-    sel["_date"] = pd.to_datetime(sel["session_date"]).dt.date
-
-    merged = sel.merge(
-        cmis_rows,
-        left_on=["_date", "slot_time", "batch_code"],
-        right_on=["_date", "slot_time", "batch_code"],
-        how="left",
-    )
-    return merged
-
+    """This Extended AE's own Mock Interview rows in range, straight from the
+    dedicated table -- trainer/program details are already denormalised in
+    at write time, so no CMIS join is needed here. Cross-pod by design --
+    the trainer being observed doesn't have to be in this AE's own
+    core_ae_faculty_map row."""
+    df = get_mock_interview_assignments(extended_ae_email, from_date, to_date)
+    if df.empty:
+        return df
+    df = df.copy()
+    df["_date"] = pd.to_datetime(df["session_date"]).dt.date
+    # Kept for backwards compatibility with app.py's f_name/l_name display.
+    names = df["trainer_name"].fillna("").str.split(" ", n=1, expand=True)
+    df["f_name"] = names[0]
+    df["l_name"] = names[1] if names.shape[1] > 1 else ""
+    df["module"] = df["c_alias"]
+    return df
 
 def all_extended_aes() -> list[str]:
     """Every Extended AE in user_roles (used for the 'pick others' escape hatch)."""
