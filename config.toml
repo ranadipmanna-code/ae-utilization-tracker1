@@ -1,9 +1,0 @@
-# Light base so the data grid renders light; palette tuned to the Anudip teal
-# theme. The in-app Light/Dark toggle restyles everything via CSS.
-[theme]
-base = "light"
-primaryColor = "#0d9488"
-backgroundColor = "#fbfbfc"
-secondaryBackgroundColor = "#ffffff"
-textColor = "#16181d"
-font = "sans serif"
