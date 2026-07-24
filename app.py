@@ -119,7 +119,9 @@ THEMES = {
         "brandbar_bg": BRAND["navy"], "brandbar_tag": "#a8bacb", "link": BRAND["sky"],
         # task-type colors for the Calendar tab
         "mock_bg": "#f6f1fd", "mock_border": "#7c4dbe", "mock_text": "#4b2483",
-        "teach_bg": "#f4f5f7", "teach_border": "#98a3ae", "teach_text": "#55616d",
+        # Amber, not grey -- Training/Teaching is mandatory now, so its
+        # badge needs to actually stand out in the day list.
+        "teach_bg": "#fef3e0", "teach_border": "#c8850f", "teach_text": "#8a5a08",
         "train_bg": "#eff6fe", "train_border": "#3b82c4", "train_text": "#1b4e76",
         # "project" moves onto orange now that teal is the brand accent --
         # same swap logic as Mock Interview did the other direction earlier.
@@ -145,7 +147,7 @@ THEMES = {
         "brandbar_bg": "#12202e", "brandbar_tag": "#8fa3b7", "link": "#63b3e8",
         # task-type colors for the Calendar tab
         "mock_bg": "#201634", "mock_border": "#a87be0", "mock_text": "#d8c3f7",
-        "teach_bg": "#1b2836", "teach_border": "#5d6b7a", "teach_text": "#b4c2d0",
+        "teach_bg": "#2c2008", "teach_border": "#f0b429", "teach_text": "#f6cc5c",
         "train_bg": "#12222f", "train_border": "#4f9fe0", "train_text": "#a9d6fb",
         "proj_bg": "#2b1c10", "proj_border": BRAND["orange_lite"], "proj_text": BRAND["orange_lite"],
         "other_bg": "#2e1520", "other_border": "#e26f90", "other_text": "#f7b8ca",
@@ -470,6 +472,9 @@ def _css(t: dict, name: str = "light") -> str:
       .scard-avail {{ border-left-color:{t['avail_border']}; }}
       .scard-mine  {{ border-left-color:{t['accent']}; background:{t['done_bg']}; }}
       .scard-lock  {{ border-left-color:{t['claim_border']}; background:{t['claim_bg']}; }}
+      /* Third tone for a Mock Interview the person actively declined --
+         distinct from "open/pending" (blue) and "yours/selected" (teal). */
+      .scard-declined {{ border-left-color:{t['other_border']}; background:{t['other_bg']}; }}
       /* An MI keeps its ownership colour but gains a warm tint, so the two
          kinds of work stay tellable apart at a glance. */
       .scard-mi {{ background:{t['mock_bg']}; }}
@@ -478,6 +483,7 @@ def _css(t: dict, name: str = "light") -> str:
                     display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
       .scard-sub {{ font-size:.79rem; color:{t['muted']}; margin-top:4px; }}
       .scard-sub b {{ color:{t['text']}; font-weight:600; }}
+      .scard-meta {{ font-size:.79rem; font-weight:400; color:{t['muted']}; margin-left:2px; }}
       .pill {{ font-size:.68rem; font-weight:600; padding:2px 9px; border-radius:980px; }}
       .pill-avail {{ background:{t['avail_border']}; color:{t['avail_text']}; }}
       .pill-mine  {{ background:{t['accent']}; color:{t['on_accent']}; }}
@@ -506,7 +512,7 @@ def _css(t: dict, name: str = "light") -> str:
       .tcard-sub {{ font-size:.78rem; color:{t['muted']}; margin-top:3px; }}
       .tchip {{ font-size:.68rem; font-weight:600; padding:2px 9px; border-radius:980px; }}
       .tchip-mock  {{ background:{t['mock_border']};  color:#fff; }}
-      .tchip-teach {{ background:{t['teach_border']}; color:#fff; }}
+      .tchip-teach {{ background:{t['teach_border']}; color:#3a2400; }}
       .tchip-eval  {{ background:{t['claim_border']}; color:#04301f; }}
       .tchip-train {{ background:{t['train_border']}; color:#fff; }}
       .tchip-proj  {{ background:{t['proj_border']};  color:#fff; }}
@@ -1156,6 +1162,7 @@ def _merge_calendar_runs(grp: pd.DataFrame) -> list[dict]:
                 r.get("batch_code") == prev["_rep"].get("batch_code")
                 and r.get("c_alias") == prev["_rep"].get("c_alias")
                 and r["task_type"] == prev["_rep"]["task_type"]
+                and bool(r.get("_locked_mi")) == bool(prev["_rep"].get("_locked_mi"))
                 and (r["task_type"] != "other"
                      or (r.get("other_note") or "") == (prev["_rep"].get("other_note") or ""))
             )
@@ -1195,13 +1202,41 @@ def _calendar_tab(user, role):
     with st.spinner("Fetching this member's schedule…"):
         cal = db.resolve_member_calendar(member_email, ws, we)
 
+    # Confirmed (Selected) cross-pod Mock Interview assignments live in their
+    # own table -- they belong to a DIFFERENT trainer's slot, not this
+    # member's own CMIS schedule, so they never show up via the own-slots
+    # query above. Fold them in here as extra, locked calendar rows so a
+    # member's Calendar reflects everything they've actually committed to.
+    my_mi = db.get_my_mock_interview_claims(member_email, ws, we)
+    if not my_mi.empty:
+        confirmed_mi = my_mi[my_mi["status"] == "Selected"].copy()
+        if not confirmed_mi.empty:
+            confirmed_mi["task_type"] = "mock_interview"
+            confirmed_mi["default_task"] = "mock_interview"
+            confirmed_mi["is_default"] = True
+            confirmed_mi["other_note"] = None
+            confirmed_mi["ref_selection_id"] = None
+            confirmed_mi["set_by"] = None
+            confirmed_mi["slot_name"] = None
+            confirmed_mi["_locked_mi"] = True
+            keep_cols = ["_date", "slot_time", "task_type", "default_task",
+                         "is_default", "other_note", "ref_selection_id", "set_by",
+                         "batch_code", "c_alias", "slot_name", "program_name",
+                         "_locked_mi"]
+            cal = pd.concat(
+                [cal, confirmed_mi[keep_cols]], ignore_index=True, sort=False,
+            )
+
     if cal.empty:
         st.info("No CMIS slots found for this member in this week — nothing to default onto.")
         return
+    if "_locked_mi" not in cal.columns:
+        cal["_locked_mi"] = False
+    cal["_locked_mi"] = cal["_locked_mi"].fillna(False)
 
     counts = cal["task_type"].value_counts().to_dict()
     chip_row = " ".join(
-        f"<span class='tchip tchip-{_task_css(tt)}'>{db.TASK_LABELS.get(tt, tt)} · {counts.get(tt, 0)}</span>"
+        f"<span class='tchip tchip-{_task_css(tt)}'>{_cal_label(tt)} · {counts.get(tt, 0)}</span>"
         for tt in db.TASK_TYPES if counts.get(tt, 0)
     )
     st.markdown(f"<div class='legend' style='margin:6px 0 14px'>{chip_row}</div>", unsafe_allow_html=True)
@@ -1232,16 +1267,34 @@ def _calendar_tab(user, role):
                     st.markdown(
                         f"""<div class="tcard tcard-{css}">
                           <div class="tcard-top">🕑 {card['slot_time']}
-                            <span class="tchip tchip-{css}">{db.TASK_LABELS.get(task, task)}</span></div>
+                            <span class="tchip tchip-{css}">{_cal_label(task)}</span></div>
                           <div class="tcard-sub">{sub_line}</div>
                         </div>""",
                         unsafe_allow_html=True,
                     )
                 with cB:
                     key = f"{r['_date']}|{card['_members'][0]['slot_time']}"
+                    is_locked_mi = bool(r.get("_locked_mi"))
                     if task == "evaluation":
                         st.markdown(
                             "<div class='locked-status'>🔒 via Evaluation<br>"
+                            "<span style='font-weight:400;opacity:.75'>change on Sessions tab</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                    elif task == "teaching" or (r.get("default_task") == "teaching" and not is_locked_mi):
+                        # Mandatory: a scheduled class is always taken by the
+                        # faculty of record -- no dropdown, nothing to choose.
+                        st.markdown(
+                            "<div class='locked-status'>🔒 Training<br>"
+                            "<span style='font-weight:400;opacity:.75'>mandatory</span></div>",
+                            unsafe_allow_html=True,
+                        )
+                    elif is_locked_mi:
+                        # Confirmed on the Mock Interview section -- also
+                        # mandatory, and not this member's own CMIS slot to
+                        # override in the first place.
+                        st.markdown(
+                            "<div class='locked-status'>🔒 Confirmed MI<br>"
                             "<span style='font-weight:400;opacity:.75'>change on Sessions tab</span></div>",
                             unsafe_allow_html=True,
                         )
@@ -1268,7 +1321,7 @@ def _calendar_tab(user, role):
                         if choice != task or (choice == "other" and note != (r.get("other_note") or "")):
                             pending[key] = (choice, note, card["_members"])
                     else:
-                        st.markdown(f"<div class='locked-status'>{db.TASK_LABELS.get(task, task)}</div>",
+                        st.markdown(f"<div class='locked-status'>{_cal_label(task)}</div>",
                                     unsafe_allow_html=True)
 
         saved = st.form_submit_button("💾  Save calendar changes", type="primary",
@@ -1305,6 +1358,16 @@ def _task_css(task_type: str) -> str:
         "evaluation": "eval", "training": "train",
         "project_involvement": "proj", "other": "other",
     }.get(task_type, "mock")
+
+
+def _cal_label(task_type: str) -> str:
+    """Calendar-only display label. 'teaching' shows as 'Training' here per
+    the AE-facing naming for this tab; every other type keeps its normal
+    db.TASK_LABELS text (including the separate 'training' override type,
+    which is a different underlying task and keeps its own 📚 icon)."""
+    if task_type == "teaching":
+        return "🏫 Training"
+    return db.TASK_LABELS.get(task_type, task_type)
 
 
 def _sessions_tab(user, role):
@@ -1500,12 +1563,20 @@ def _sessions_tab(user, role):
 def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
     """Mock Interview section, shown under the session list.
 
-    Extended AE  -> editable list of their auto-assigned MIs. Changing a
-                    dropdown reruns immediately so the card recolours to match
-                    (green = Selected, amber = Not Selected) before Save.
+    Extended AE  -> editable list of their auto-assigned MIs, one of three
+                    states each:
+                      Pending      (default) awaiting a decision -- sits in
+                                   the MI pool, not yet on the calendar.
+                      Selected     confirmed -- appears on the Calendar tab.
+                      Not Selected declined -- released back to the MI pool
+                                   for reassignment.
+                    Changing a dropdown reruns immediately so the card
+                    recolours to match before Save.
     Core AE/admin -> read-only view of what their Extended AE team has picked.
     """
-    mi_opts = ["Selected", "Not Selected"]
+    mi_opts = ["Pending", "Selected", "Not Selected"]
+    mi_labels = {"Pending": "Default", "Selected": "Selected", "Not Selected": "Not Selected"}
+    mi_card_cls = {"Pending": "scard-avail", "Selected": "scard-mine", "Not Selected": "scard-declined"}
 
     if role == "extended_ae":
         my_mi = db.get_my_mock_interview_claims(user["email"], date_from, date_to)
@@ -1514,7 +1585,9 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
             st.caption(
                 "Auto-assigned Mock Interview sessions for you to observe/evaluate — "
                 "these can be from any trainer, not just your own Core AE's pod. "
-                "Unselect any you can't make, then Save."
+                "Each starts as **Default** (pending) — pick **Selected** to put it "
+                "on your Calendar, or **Not Selected** to send it back to the MI pool "
+                "for someone else, then Save."
             )
             my_mi = my_mi.sort_values(["_date", "slot_time"]).reset_index(drop=True)
             row_meta: dict[str, tuple] = {}   # widget key -> (row, saved status)
@@ -1522,18 +1595,20 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                 trainer = f"{r.get('f_name') or ''} {r.get('l_name') or ''}".strip() or "Unknown trainer"
                 day_lbl = pd.to_datetime(r["_date"]).strftime("%a, %d %b")
                 wkey = f"mi_{r['id']}"
-                cur = r["status"] if r["status"] in mi_opts else "Selected"
+                cur = r["status"] if r["status"] in mi_opts else "Pending"
                 # Live value: whatever the dropdown holds this run (falls back to
                 # the saved status on first render). Drives the card colour.
                 live = st.session_state.get(wkey, cur)
-                card_cls = "scard-mine" if live == "Selected" else "scard-avail"
+                card_cls = mi_card_cls.get(live, "scard-avail")
+                meta_bits = [trainer, r.get("batch_code") or "", r.get("c_alias") or "",
+                             r.get("program_name") or ""]
+                meta = " · ".join(b for b in meta_bits if b)
                 cA, cB = st.columns([4, 1.3])
                 with cA:
                     st.markdown(
                         f"<div class='scard {card_cls}'>"
-                        f"<div class='scard-top'>🕑 {day_lbl} · {r['slot_time']}</div>"
-                        f"<div class='scard-sub'>{trainer} · {r.get('batch_code') or ''} · "
-                        f"{r.get('c_alias') or ''} · {r.get('program_name') or ''}</div></div>",
+                        f"<div class='scard-top'>🕑 {day_lbl} · {r['slot_time']}"
+                        f"<span class='scard-meta'>· {meta}</span></div></div>",
                         unsafe_allow_html=True,
                     )
                 with cB:
@@ -1541,6 +1616,7 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                     # card can recolour instantly. Save is a normal button below.
                     st.selectbox(
                         "status", mi_opts, index=mi_opts.index(cur),
+                        format_func=lambda o: mi_labels.get(o, o),
                         key=wkey, label_visibility="collapsed",
                     )
                 row_meta[wkey] = (r, cur)
