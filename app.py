@@ -23,6 +23,7 @@ RBAC via user_roles.role:
   extended_ae  -> own paired Core AE's faculty, can claim
 """
 from datetime import date, datetime, timedelta
+import re
 
 import pandas as pd
 import streamlit as st
@@ -181,6 +182,18 @@ def _css(t: dict, name: str = "light") -> str:
         letter-spacing:-0.006em;
       }}
       [data-testid="stHeader"] {{ background:transparent !important; }}
+      /* Streamlit's own sidebar collapse/expand control -- the pale default
+         is nearly invisible against the page background in either theme. */
+      [data-testid="stSidebarCollapsedControl"] button,
+      [data-testid="stSidebarCollapsedControl"] svg {{
+        color:{t['text']} !important; fill:{t['text']} !important;
+      }}
+      [data-testid="stSidebarCollapsedControl"] button {{
+        background:{t['surface_2']} !important; border:1px solid {t['border']} !important;
+      }}
+      [data-testid="stSidebarCollapsedControl"] button:hover {{
+        background:{t['chip_bg']} !important;
+      }}
       .block-container {{ padding-top:2.2rem; padding-bottom:5rem; max-width:1120px; }}
       h1,h2,h3,h4 {{ font-family:"Poppins","Open Sans",sans-serif !important; }}
       h1 {{ font-weight:700; letter-spacing:-.02em; font-size:2rem; margin-bottom:0; line-height:1.18; }}
@@ -209,6 +222,21 @@ def _css(t: dict, name: str = "light") -> str:
         border-color:{t['muted']} !important;
       }}
       [data-testid="stSidebar"] .stButton > button * {{ color:inherit !important; }}
+      /* Refresh needs to read as an actual action, not blend into the quiet
+         sign-out style. st.container(key="refresh_btn") gives a stable,
+         version-proof CSS hook (Streamlit always emits st-key-<name> for a
+         keyed container) rather than guessing at internal button attributes.
+         Filled with the theme's accent -- darker teal in light mode, lighter
+         teal in dark mode -- already tuned per theme via accent/on_accent. */
+      .st-key-refresh_btn .stButton > button {{
+        background:{t['accent']} !important; color:{t['on_accent']} !important;
+        border:none !important; font-weight:600 !important;
+      }}
+      .st-key-refresh_btn .stButton > button:hover {{
+        background:{t['accent_hover']} !important; color:{t['on_accent']} !important;
+        border:none !important;
+      }}
+      .st-key-refresh_btn .stButton > button * {{ color:{t['on_accent']} !important; }}
 
       /* ---------- ALL INPUT SHELLS ---------- */
       div[data-baseweb="select"] > div,
@@ -844,11 +872,12 @@ def dashboard():
         st.caption(f"{user['email']} · {role}")
         c_refresh, c_signout = st.columns(2)
         with c_refresh:
-            if st.button("🔄 Refresh", use_container_width=True,
-                         help="Re-pull the latest data from CMIS and the app DB. "
-                              "Does not sign you out."):
-                db.clear_all_caches()
-                st.rerun()
+            with st.container(key="refresh_btn"):
+                if st.button("🔄 Refresh", use_container_width=True,
+                             help="Re-pull the latest data from CMIS and the app DB. "
+                                  "Does not sign you out."):
+                    db.clear_all_caches()
+                    st.rerun()
         with c_signout:
             if st.button("Sign out", use_container_width=True):
                 del st.session_state.user
@@ -866,6 +895,7 @@ def dashboard():
             with st.form("change_pwd", clear_on_submit=True):
                 cur_pw = st.text_input("Current password", type="password", key="cp_cur")
                 new_pw1 = st.text_input("New password", type="password", key="cp_new1")
+                st.caption("At least 8 characters, with at least one letter and one number.")
                 new_pw2 = st.text_input("Confirm new password", type="password", key="cp_new2")
                 submitted = st.form_submit_button("Update password", use_container_width=True)
             if submitted:
@@ -876,10 +906,16 @@ def dashboard():
                     if has_personal_pw
                     else cur_pw == st.secrets["auth"]["shared_password"]
                 )
+                pw_valid = (
+                    len(new_pw1) >= 8
+                    and re.search(r"[A-Za-z]", new_pw1)
+                    and re.search(r"[0-9]", new_pw1)
+                )
                 if not cur_ok:
                     st.error("Current password is incorrect.")
-                elif len(new_pw1) < 8:
-                    st.error("New password must be at least 8 characters.")
+                elif not pw_valid:
+                    st.error("New password must be at least 8 characters, with at least "
+                              "one letter and one number.")
                 elif new_pw1 != new_pw2:
                     st.error("New passwords don't match.")
                 else:
