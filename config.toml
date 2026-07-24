@@ -3,16 +3,18 @@
 # drive components Streamlit renders itself and that CSS cannot reach.
 #
 # Values mirror THEMES["light"] in app.py -- keep the two in step.
+# Palette follows the anudip.org identity: the orange of the "Donate Now"
+# call-to-action and the deep navy of the site header/footer.
 #
 # IMPORTANT: this file must live at .streamlit/config.toml. Streamlit does NOT
 # read a config.toml sitting at the repository root; when it did, base="light"
 # was silently ignored and the data grid rendered dark inside a light page.
 [theme]
 base = "light"
-primaryColor = "#ee7623"            # Anudip orange — buttons, focus, checkboxes
+primaryColor = "#f47b20"            # Anudip orange — buttons, focus, checkboxes
 backgroundColor = "#fbfaf8"         # warm paper white
 secondaryBackgroundColor = "#ffffff"
-textColor = "#14293f"               # Anudip navy ink
+textColor = "#16283c"               # Anudip navy ink
 font = "sans serif"
 
 [server]
