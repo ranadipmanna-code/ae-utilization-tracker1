@@ -52,11 +52,12 @@ st.set_page_config(page_title="AE Utilization Tracker", layout="wide", page_icon
 # light and dark palettes below are derived from these five values.
 # ---------------------------------------------------------------------------
 BRAND = {
-    "orange":      "#ee7623",   # primary — CTAs, "mine", focus rings
-    "orange_dark": "#c85f14",   # hover / pressed
-    "orange_lite": "#f7913f",   # the dark theme needs a lighter orange to read
-    "navy":        "#14293f",   # headings and body text on light
-    "navy_deep":   "#0d1620",   # the dark theme canvas
+    "orange":      "#f47b20",   # primary — Donate Now CTA, "mine", focus rings
+    "orange_dark": "#d2610d",   # hover / pressed
+    "orange_lite": "#fa9a4d",   # the dark theme needs a lighter orange to read
+    "navy":        "#16283c",   # headings, nav bar and footer ink
+    "navy_deep":   "#0c1725",   # the dark theme canvas
+    "sky":         "#1b7fc4",   # secondary link/accent blue used across the site
 }
 
 # ---------------------------------------------------------------------------
@@ -95,7 +96,9 @@ THEMES = {
         "claim_bg": "#f1faf4", "claim_border": "#2e9e63", "claim_text": "#0c5c31",
         "done_bg": "#fdf3ea", "done_border": BRAND["orange"],
         "chip_bg": "#f1f3f6", "chip_text": "#56687c",
-        "shadow": "0 1px 2px rgba(20,41,63,.05), 0 4px 16px rgba(20,41,63,.06)",
+        "shadow": "0 1px 2px rgba(22,40,60,.05), 0 4px 16px rgba(22,40,60,.06)",
+        "accent_hover": BRAND["orange_dark"], "accent_lite": BRAND["orange_lite"],
+        "brandbar_bg": BRAND["navy"], "brandbar_tag": "#a8bacb", "link": BRAND["sky"],
         # task-type colors for the Calendar tab
         "mock_bg": "#f6f1fd", "mock_border": "#7c4dbe", "mock_text": "#4b2483",
         "teach_bg": "#f4f5f7", "teach_border": "#98a3ae", "teach_text": "#55616d",
@@ -118,6 +121,8 @@ THEMES = {
         "done_bg": "#2b1c10", "done_border": BRAND["orange_lite"],
         "chip_bg": "#222f3c", "chip_text": "#b4c2d0",
         "shadow": "0 1px 2px rgba(0,0,0,.45), 0 8px 24px rgba(0,0,0,.55)",
+        "accent_hover": BRAND["orange"], "accent_lite": BRAND["orange_lite"],
+        "brandbar_bg": "#12202e", "brandbar_tag": "#8fa3b7", "link": "#63b3e8",
         # task-type colors for the Calendar tab
         "mock_bg": "#201634", "mock_border": "#a87be0", "mock_text": "#d8c3f7",
         "teach_bg": "#1b2836", "teach_border": "#5d6b7a", "teach_text": "#b4c2d0",
@@ -145,19 +150,20 @@ def _css(t: dict, name: str = "light") -> str:
         background-color:{t['surface']} !important;
         background-image:none !important;
       }}
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&family=Open+Sans:wght@400;500;600;700&display=swap');
       html, body, [data-testid="stAppViewContainer"], .stApp {{
         background:{t['bg']} !important; color:{t['text']} !important;
-        font-family:"Inter","Inter var",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+        font-family:"Open Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
         -webkit-font-smoothing:antialiased;
         -moz-osx-font-smoothing:grayscale;
         letter-spacing:-0.006em;
       }}
       [data-testid="stHeader"] {{ background:transparent !important; }}
       .block-container {{ padding-top:2.2rem; padding-bottom:5rem; max-width:1120px; }}
-      h1 {{ font-weight:600; letter-spacing:-.03em; font-size:1.9rem; margin-bottom:0; line-height:1.15; }}
-      h2 {{ font-weight:600; letter-spacing:-.02em; font-size:1.35rem; }}
-      h3 {{ font-weight:600; letter-spacing:-.015em; font-size:1.1rem; }}
+      h1,h2,h3,h4 {{ font-family:"Poppins","Open Sans",sans-serif !important; }}
+      h1 {{ font-weight:700; letter-spacing:-.02em; font-size:2rem; margin-bottom:0; line-height:1.18; }}
+      h2 {{ font-weight:600; letter-spacing:-.01em; font-size:1.4rem; }}
+      h3 {{ font-weight:600; letter-spacing:-.01em; font-size:1.12rem; }}
       p,span,label,div,li {{ color:{t['text']}; }}
       [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {{
         color:{t['muted']} !important; font-size:.83rem;
@@ -650,6 +656,64 @@ def _css(t: dict, name: str = "light") -> str:
       hr, [data-testid="stDivider"] {{ border-color:{t['border']} !important; }}
       [data-testid="stAlert"] {{ border-radius:10px; }}
       div[role="radiogroup"] label {{ font-size:.85rem; }}
+    
+      /* ---------- ANUDIP.ORG BRAND CHROME ---------- */
+      /* The site's buttons are fully-rounded pills, not soft rectangles. */
+      .stButton > button, .stFormSubmitButton > button, .stDownloadButton > button {{
+        border-radius:999px !important;
+        font-family:"Poppins","Open Sans",sans-serif !important;
+        font-weight:600 !important; letter-spacing:.01em;
+        padding:.5rem 1.4rem !important;
+        transition:background .18s ease, transform .18s ease, box-shadow .18s ease;
+      }}
+      .stButton > button:hover, .stFormSubmitButton > button:hover,
+      .stDownloadButton > button:hover {{
+        background:{t['accent_hover']} !important;
+        box-shadow:0 6px 18px {t['accent']}45 !important;
+        transform:translateY(-1px);
+      }}
+      /* the sidebar sign-out stays quiet — undo the pill fill there */
+      [data-testid="stSidebar"] .stButton > button:hover {{
+        background:transparent !important; box-shadow:none !important; transform:none;
+      }}
+
+      /* Navy masthead with the orange keyline, echoing the site header/footer. */
+      .brandbar {{
+        display:flex; align-items:center; gap:14px;
+        background:{t['brandbar_bg']};
+        border-bottom:3px solid {t['accent']};
+        border-radius:14px 14px 0 0;
+        padding:16px 22px; margin:0 0 22px;
+      }}
+      .brandbar .bb-mark {{
+        width:38px; height:38px; border-radius:50%; flex:0 0 38px;
+        background:{t['accent']}; color:#fff;
+        font-family:"Poppins",sans-serif; font-weight:700; font-size:1.05rem;
+        display:flex; align-items:center; justify-content:center;
+      }}
+      .brandbar .bb-name {{
+        font-family:"Poppins",sans-serif; font-weight:600; font-size:1.02rem;
+        color:#fff !important; line-height:1.2;
+      }}
+      .brandbar .bb-tag {{
+        font-size:.76rem; color:{t['brandbar_tag']} !important;
+        letter-spacing:.06em; text-transform:uppercase; margin-top:2px;
+      }}
+      .brandbar .bb-right {{
+        margin-left:auto; font-size:.74rem; letter-spacing:.08em;
+        text-transform:uppercase; color:{t['accent_lite']} !important; font-weight:600;
+      }}
+
+      /* Section headings get the short orange underline the site uses. */
+      h1::after {{
+        content:""; display:block; width:56px; height:3px; border-radius:2px;
+        background:{t['accent']}; margin-top:10px;
+      }}
+      /* Tab underline in brand orange rather than Streamlit red. */
+      .stTabs [aria-selected="true"] {{ box-shadow:inset 0 -2px 0 {t['accent']} !important; }}
+      a, a:visited {{ color:{t['link']} !important; }}
+      a:hover {{ color:{t['accent']} !important; }}
+
     </style>
     """
 
@@ -693,6 +757,10 @@ def login_view():
     with mid:
         st.markdown('<div class="login-wrap">', unsafe_allow_html=True)
         st.markdown(
+            '<div class="brandbar" style="border-radius:14px">'
+            '<div class="bb-mark">A</div>'
+            '<div><div class="bb-name">Anudip Foundation</div>'
+            '<div class="bb-tag">Life. Transformed.</div></div></div>'
             '<div class="login-title">AE Utilization Tracker</div>'
             '<div class="login-sub">Academic Excellence · Anudip Foundation</div>',
             unsafe_allow_html=True,
@@ -753,8 +821,14 @@ def dashboard():
         )
 
     st.markdown(
+        "<div class='brandbar'>"
+        "<div class='bb-mark'>A</div>"
+        "<div><div class='bb-name'>Anudip Foundation for Social Welfare</div>"
+        "<div class='bb-tag'>Life. Transformed.</div></div>"
+        "<div class='bb-right'>Academic Excellence</div>"
+        "</div>"
         "<h1 style='margin-bottom:2px'>Extended AE Utilization Tracker</h1>"
-        "<p style='opacity:.6;margin-top:0;font-size:.92rem'>"
+        "<p style='opacity:.6;margin-top:10px;font-size:.92rem'>"
         "Faculty observation scheduling · live from CMIS + Anudip AE Team DB</p>",
         unsafe_allow_html=True,
     )
