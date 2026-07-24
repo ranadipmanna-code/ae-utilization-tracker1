@@ -1206,7 +1206,12 @@ def auto_assign_mock_interviews(
     already_assigned_by_ae: dict[str, set[tuple]] = {}
     if not existing.empty:
         for _, r in existing.iterrows():
-            if str(r["status"]) != "Selected":
+            # A "Not Selected" row is the only status that frees a candidate
+            # back up. "Pending" (assigned but not yet confirmed) still
+            # holds the slot -- otherwise re-running allocation before
+            # someone has decided would hand the same interview to a
+            # second Extended AE.
+            if str(r["status"]) == "Not Selected":
                 continue
             d = pd.to_datetime(r["session_date"]).date()
             k = (d, r["slot_time"], r["batch_code"])
@@ -1229,7 +1234,7 @@ def auto_assign_mock_interviews(
 
     busy_by_ae: dict[str, set[tuple]] = {}
     busy_days_by_ae: dict[str, set[date]] = {}
-    _claimed_like = {"Selected", "Confirmed", "Choosing"}
+    _claimed_like = {"Selected", "Confirmed", "Choosing", "Pending"}
     for ae in aes:
         own = own_by_ae.get(ae)
         times = set()
@@ -1281,7 +1286,7 @@ def auto_assign_mock_interviews(
         upsert_mock_interview_assignment(
             ae, sess["date"], sess["slot_time"], sess["batch_code"],
             sess["c_alias"], info.get("trainer_email"), info.get("trainer_name"),
-            info.get("program_name"), status="Selected", source="auto",
+            info.get("program_name"), status="Pending", source="auto",
         )
         by_ae[ae] = by_ae.get(ae, 0) + 1
 
