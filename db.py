@@ -13,6 +13,9 @@ All CMIS access is strictly SELECT — we never write there.
 from __future__ import annotations
 
 import calendar
+import hashlib
+import hmac
+import os
 import re
 from datetime import date, timedelta
 from typing import Any
@@ -227,6 +230,78 @@ def fetch_sessions_all(week_start: date, week_end: date, limit: int = 5000) -> p
 def get_user_roles() -> pd.DataFrame:
     with app_engine().connect() as conn:
         return pd.read_sql(text("SELECT email, name, role FROM user_roles"), conn)
+
+
+# ---------------------------------------------------------------------------
+# Per-user passwords
+#
+# Historically everyone signed in with one shared password (st.secrets
+# ["auth"]["shared_password"]). That still works as a fallback for anyone
+# who hasn't set a personal password yet -- password_hash/password_salt are
+# NULL for them, so login_view() falls through to the old comparison. Once
+# someone sets their own password via the sidebar, their row's hash takes
+# over and the shared password no longer works for their account.
+#
+# Hashing uses PBKDF2-HMAC-SHA256 from the standard library (no new
+# dependency). Each password gets its own random 16-byte salt.
+# ---------------------------------------------------------------------------
+_PBKDF2_ITERATIONS = 200_000
+
+
+def _hash_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
+    """(salt_hex, hash_hex). Generates a fresh salt unless one is supplied
+    (supply one only when re-deriving a hash to verify against)."""
+    salt = bytes.fromhex(salt_hex) if salt_hex else os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    return salt.hex(), dk.hex()
+
+
+def verify_password(password: str, salt_hex: str, hash_hex: str) -> bool:
+    """Constant-time comparison -- avoids leaking timing info about how
+    much of the hash matched."""
+    _, computed = _hash_password(password, salt_hex)
+    return hmac.compare_digest(computed, hash_hex)
+
+
+def get_user_auth(email: str) -> dict | None:
+    """This user's row plus password_hash/password_salt (NULL/NULL if they
+    haven't set a personal password yet). None if the email doesn't exist."""
+    sql = text(
+        "SELECT email, name, role, password_hash, password_salt "
+        "FROM user_roles WHERE LOWER(email) = LOWER(:e) LIMIT 1"
+    )
+    with app_engine().connect() as conn:
+        row = conn.execute(sql, {"e": email}).mappings().fetchone()
+    return dict(row) if row else None
+
+
+def set_user_password(email: str, new_password: str) -> None:
+    """Hash and store this user's own password. From this point on, the
+    shared password no longer works for their account -- only this one."""
+    salt_hex, hash_hex = _hash_password(new_password)
+    with app_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE user_roles SET password_hash=:h, password_salt=:s, "
+                "password_updated_on=NOW() WHERE LOWER(email)=LOWER(:e)"
+            ),
+            {"h": hash_hex, "s": salt_hex, "e": email},
+        )
+
+
+def clear_user_password(email: str) -> None:
+    """Admin escape hatch: wipe a forgotten personal password, reverting
+    that account to the shared password until they set a new one. There is
+    no self-service 'forgot password' flow (no email delivery configured),
+    so a locked-out person needs an admin to run this for them."""
+    with app_engine().begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE user_roles SET password_hash=NULL, password_salt=NULL, "
+                "password_updated_on=NULL WHERE LOWER(email)=LOWER(:e)"
+            ),
+            {"e": email},
+        )
 
 
 @st.cache_data(ttl=60, show_spinner=False)
