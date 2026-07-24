@@ -1171,8 +1171,37 @@ def upsert_mock_interview_assignment(
     (extended_ae_email, session_date, slot_time, batch_code) -- so re-running
     the auto-assignment, or a person toggling their own status, is always an
     upsert, never a duplicate row.
+
+    EXCLUSIVITY: one interview can only ever be held by one Extended AE.
+    When this writes a LIVE status (anything other than "Not Selected"), it
+    also releases every OTHER AE's hold on the same (date, slot, batch) in
+    the same transaction.
+
+    Without this, claiming from the MI Pool wrote the claimer's row but left
+    the original assignee's "Pending" row untouched -- so the interview kept
+    showing in that person's "My Mock Interviews" as Default even though
+    somebody else had already taken it. The two writes have to be atomic:
+    if the release succeeded but the claim failed, an interview nobody holds
+    would silently vanish from everyone's list.
     """
+    is_live = str(status) != "Not Selected"
     with app_engine().begin() as conn:
+        if is_live:
+            conn.execute(
+                text(
+                    f"""
+                    UPDATE {MOCK_INTERVIEW_TABLE}
+                    SET status = 'Not Selected', updated_on = NOW()
+                    WHERE session_date = :d
+                      AND slot_time = :st
+                      AND (batch_code = :bc OR (batch_code IS NULL AND :bc IS NULL))
+                      AND LOWER(extended_ae_email) <> LOWER(:ae)
+                      AND status <> 'Not Selected'
+                    """
+                ),
+                {"d": session_date, "st": slot_time, "bc": batch_code,
+                 "ae": extended_ae_email},
+            )
         conn.execute(
             text(
                 f"""
@@ -1280,19 +1309,22 @@ def auto_assign_mock_interviews(
     already_claimed_keys: set[tuple] = set()
     already_assigned_by_ae: dict[str, set[tuple]] = {}
     if not existing.empty:
+        # A key is claimed if ANY row holds it live (Pending/Selected/etc).
+        # This must be decided PER KEY across all rows, not per row: an
+        # earlier version skipped each "Not Selected" row individually,
+        # which meant one AE declining an interview released the key even
+        # while a DIFFERENT AE still held it Pending -- so the next
+        # allocation run happily handed the same interview to a second
+        # person. Only a key where every row is "Not Selected" (i.e. nobody
+        # is holding it) goes back into the candidate pool.
         for _, r in existing.iterrows():
-            # A "Not Selected" row is the only status that frees a candidate
-            # back up. "Pending" (assigned but not yet confirmed) still
-            # holds the slot -- otherwise re-running allocation before
-            # someone has decided would hand the same interview to a
-            # second Extended AE.
-            if str(r["status"]) == "Not Selected":
-                continue
             d = pd.to_datetime(r["session_date"]).date()
             k = (d, r["slot_time"], r["batch_code"])
-            already_claimed_keys.add(k)
-            if r["extended_ae_email"] in aes:
-                already_assigned_by_ae.setdefault(r["extended_ae_email"], set()).add(k)
+            if str(r["status"]) != "Not Selected":
+                already_claimed_keys.add(k)
+                if r["extended_ae_email"] in aes:
+                    already_assigned_by_ae.setdefault(
+                        r["extended_ae_email"], set()).add(k)
 
     # Both of these used to be a query PER Extended AE -- 2N round-trips.
     # Now it's two, and the per-AE split happens in pandas.
@@ -1677,7 +1709,8 @@ def get_member_own_slots(member_email: str, from_date: date, to_date: date) -> p
     sql = text(
         f"""
         SELECT s_date, slot_name, slot_time, day_name, batch_code, m_code,
-               c_alias, program_name
+               c_alias, program_name,
+               TRIM(CONCAT(COALESCE(f_name,''), ' ', COALESCE(l_name,''))) AS trainer_name
         FROM {CMIS_VIEW}
         WHERE email_id = :e AND s_date BETWEEN :a AND :b
         ORDER BY s_date, slot_time
