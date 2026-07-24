@@ -810,11 +810,18 @@ def login_view():
         if match.empty:
             st.error("Email not found.")
             return
-        if pwd != st.secrets["auth"]["shared_password"]:
+        row = match.iloc[0]
+        auth = db.get_user_auth(email)
+        has_personal_pw = bool(auth and auth.get("password_hash") and auth.get("password_salt"))
+        if has_personal_pw:
+            pw_ok = db.verify_password(pwd, auth["password_salt"], auth["password_hash"])
+        else:
+            pw_ok = pwd == st.secrets["auth"]["shared_password"]
+        if not pw_ok:
             st.error("Incorrect password.")
             return
-        row = match.iloc[0]
         st.session_state.user = {"email": row["email"], "name": row["name"], "role": row["role"]}
+        st.session_state["_using_shared_password"] = not has_personal_pw
         st.rerun()
 
 
@@ -835,9 +842,51 @@ def dashboard():
     with st.sidebar:
         st.markdown(f"### {user['name']}")
         st.caption(f"{user['email']} · {role}")
-        if st.button("Sign out", use_container_width=True):
-            del st.session_state.user
-            st.rerun()
+        c_refresh, c_signout = st.columns(2)
+        with c_refresh:
+            if st.button("🔄 Refresh", use_container_width=True,
+                         help="Re-pull the latest data from CMIS and the app DB. "
+                              "Does not sign you out."):
+                db.clear_all_caches()
+                st.rerun()
+        with c_signout:
+            if st.button("Sign out", use_container_width=True):
+                del st.session_state.user
+                st.rerun()
+
+        using_shared = st.session_state.get("_using_shared_password", True)
+        pw_label = "🔑 Set your own password" if using_shared else "🔑 Change password"
+        with st.expander(pw_label):
+            if using_shared:
+                st.caption(
+                    "You're currently signed in with the shared password. "
+                    "Set your own here for better security -- once you do, "
+                    "the shared password will no longer work for your account."
+                )
+            with st.form("change_pwd", clear_on_submit=True):
+                cur_pw = st.text_input("Current password", type="password", key="cp_cur")
+                new_pw1 = st.text_input("New password", type="password", key="cp_new1")
+                new_pw2 = st.text_input("Confirm new password", type="password", key="cp_new2")
+                submitted = st.form_submit_button("Update password", use_container_width=True)
+            if submitted:
+                auth = db.get_user_auth(user["email"])
+                has_personal_pw = bool(auth and auth.get("password_hash") and auth.get("password_salt"))
+                cur_ok = (
+                    db.verify_password(cur_pw, auth["password_salt"], auth["password_hash"])
+                    if has_personal_pw
+                    else cur_pw == st.secrets["auth"]["shared_password"]
+                )
+                if not cur_ok:
+                    st.error("Current password is incorrect.")
+                elif len(new_pw1) < 8:
+                    st.error("New password must be at least 8 characters.")
+                elif new_pw1 != new_pw2:
+                    st.error("New passwords don't match.")
+                else:
+                    db.set_user_password(user["email"], new_pw1)
+                    st.session_state["_using_shared_password"] = False
+                    st.success("Password updated -- use your new password next time you sign in.")
+
         st.divider()
         _theme_toggle("theme_app")
         st.divider()
@@ -1202,6 +1251,20 @@ def _calendar_tab(user, role):
     with st.spinner("Fetching this member's schedule…"):
         cal = db.resolve_member_calendar(member_email, ws, we)
 
+    # Own-slot (date, slot_time) pairs, captured BEFORE any synthetic rows are
+    # folded in -- used below to make sure a cross-pod claim never gets
+    # rendered twice on the rare occasion it coincides with one of the
+    # member's own CMIS slots (which already surfaces it correctly via the
+    # normal ae_slot_task override path inside resolve_member_calendar).
+    own_keys = set()
+    if not cal.empty:
+        own_keys = set(zip(cal["_date"], cal["slot_time"]))
+
+    _SYNTH_COLS = ["_date", "slot_time", "task_type", "default_task",
+                   "is_default", "other_note", "ref_selection_id", "set_by",
+                   "batch_code", "c_alias", "slot_name", "program_name",
+                   "_locked_mi"]
+
     # Confirmed (Selected) cross-pod Mock Interview assignments live in their
     # own table -- they belong to a DIFFERENT trainer's slot, not this
     # member's own CMIS schedule, so they never show up via the own-slots
@@ -1211,6 +1274,10 @@ def _calendar_tab(user, role):
     if not my_mi.empty:
         confirmed_mi = my_mi[my_mi["status"] == "Selected"].copy()
         if not confirmed_mi.empty:
+            confirmed_mi = confirmed_mi[
+                ~confirmed_mi.apply(lambda r: (r["_date"], r["slot_time"]) in own_keys, axis=1)
+            ]
+        if not confirmed_mi.empty:
             confirmed_mi["task_type"] = "mock_interview"
             confirmed_mi["default_task"] = "mock_interview"
             confirmed_mi["is_default"] = True
@@ -1219,13 +1286,37 @@ def _calendar_tab(user, role):
             confirmed_mi["set_by"] = None
             confirmed_mi["slot_name"] = None
             confirmed_mi["_locked_mi"] = True
-            keep_cols = ["_date", "slot_time", "task_type", "default_task",
-                         "is_default", "other_note", "ref_selection_id", "set_by",
-                         "batch_code", "c_alias", "slot_name", "program_name",
-                         "_locked_mi"]
-            cal = pd.concat(
-                [cal, confirmed_mi[keep_cols]], ignore_index=True, sort=False,
-            )
+            cal = pd.concat([cal, confirmed_mi[_SYNTH_COLS]], ignore_index=True, sort=False)
+
+    # Confirmed (Selected/Confirmed) Evaluation claims have the exact same
+    # gap: claiming to OBSERVE another trainer's class writes an override
+    # into ae_slot_task keyed to the observer, but that override only ever
+    # gets picked up by the per-day render loop below if its (date,
+    # slot_time) already exists among the observer's own CMIS rows -- which
+    # it essentially never does, since you're watching someone ELSE teach.
+    # The override was always being written correctly (Sessions tab claiming
+    # worked); it just never had a calendar row to attach to. Same fix as
+    # Mock Interview: fold the claim itself in as a synthetic row.
+    my_claims = db.get_selections_for_role(member_role, member_email, ws, we)
+    if not my_claims.empty:
+        claimed = my_claims[my_claims["status"].isin(CLAIMED)].copy()
+        if not claimed.empty:
+            claimed["_date"] = pd.to_datetime(claimed["session_date"]).dt.date
+            claimed = claimed[
+                ~claimed.apply(lambda r: (r["_date"], r["slot_time"]) in own_keys, axis=1)
+            ]
+        if not claimed.empty:
+            claimed["task_type"] = "evaluation"
+            claimed["default_task"] = "evaluation"
+            claimed["is_default"] = True
+            claimed["other_note"] = None
+            claimed["ref_selection_id"] = claimed["id"]
+            claimed["set_by"] = None
+            claimed["slot_name"] = None
+            claimed["c_alias"] = claimed["module"]
+            claimed["program_name"] = None
+            claimed["_locked_mi"] = False
+            cal = pd.concat([cal, claimed[_SYNTH_COLS]], ignore_index=True, sort=False)
 
     if cal.empty:
         st.info("No CMIS slots found for this member in this week — nothing to default onto.")
