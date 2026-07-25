@@ -866,6 +866,44 @@ def login_view():
             email = st.text_input("Email", placeholder="you@anudip.org").strip().lower()
             pwd = st.text_input("Password", type="password", placeholder="••••••••")
             ok = st.form_submit_button("Sign in", use_container_width=True)
+
+        with st.expander("🔑 Change password"):
+            st.caption(
+                "Change your password without signing in. Enter your email and "
+                "current password, then your new one. New password: at least 8 "
+                "characters, with at least one letter and one number."
+            )
+            with st.form("login_change_pwd", clear_on_submit=True):
+                cp_email = st.text_input("Email", key="lcp_email",
+                                         placeholder="you@anudip.org").strip().lower()
+                cp_cur = st.text_input("Current password", type="password", key="lcp_cur")
+                cp_new1 = st.text_input("New password", type="password", key="lcp_new1")
+                cp_new2 = st.text_input("Confirm new password", type="password", key="lcp_new2")
+                cp_ok = st.form_submit_button("Update password", use_container_width=True)
+            if cp_ok:
+                roles = db.get_user_roles()
+                if roles[roles["email"].str.lower() == cp_email].empty:
+                    st.error("Email not found.")
+                else:
+                    auth = db.get_user_auth(cp_email)
+                    has_pw = bool(auth and auth.get("password_hash") and auth.get("password_salt"))
+                    cur_ok = (
+                        db.verify_password(cp_cur, auth["password_salt"], auth["password_hash"])
+                        if has_pw else cp_cur == st.secrets["auth"]["shared_password"]
+                    )
+                    pw_valid = (len(cp_new1) >= 8 and re.search(r"[A-Za-z]", cp_new1)
+                                and re.search(r"[0-9]", cp_new1))
+                    if not cur_ok:
+                        st.error("Current password is incorrect.")
+                    elif not pw_valid:
+                        st.error("New password must be at least 8 characters, "
+                                 "with at least one letter and one number.")
+                    elif cp_new1 != cp_new2:
+                        st.error("New passwords don't match.")
+                    else:
+                        db.set_user_password(cp_email, cp_new1)
+                        st.success("Password updated — sign in with your new password.")
+
         _theme_toggle("theme_login")
         cmis_ok, app_ok = db.ping()
         st.markdown(
@@ -914,12 +952,11 @@ def dashboard():
         st.caption(f"{user['email']} · {role}")
         c_refresh, c_signout = st.columns(2)
         with c_refresh:
-            with st.container(key="refresh_btn"):
-                if st.button("🔄 Refresh", use_container_width=True,
-                             help="Re-pull the latest data from CMIS and the app DB. "
-                                  "Does not sign you out."):
-                    db.clear_all_caches()
-                    st.rerun()
+            if st.button("🔄 Refresh", use_container_width=True, type="primary",
+                         help="Re-pull the latest data from CMIS and the app DB. "
+                              "Does not sign you out."):
+                db.clear_all_caches()
+                st.rerun()
         with c_signout:
             if st.button("Sign out", use_container_width=True):
                 del st.session_state.user
@@ -1349,7 +1386,7 @@ def _calendar_tab(user, role):
     _SYNTH_COLS = ["_date", "slot_time", "task_type", "default_task",
                    "is_default", "other_note", "ref_selection_id", "set_by",
                    "batch_code", "c_alias", "slot_name", "program_name",
-                   "_locked_mi"]
+                   "trainer_name", "_locked_mi"]
 
     # Confirmed (Selected) cross-pod Mock Interview assignments live in their
     # own table -- they belong to a DIFFERENT trainer's slot, not this
@@ -1401,6 +1438,12 @@ def _calendar_tab(user, role):
             claimed["slot_name"] = None
             claimed["c_alias"] = claimed["module"]
             claimed["program_name"] = None
+            # The selection tables don't store the observed trainer's name.
+            # Leave it blank rather than KeyError -- the card still renders
+            # (batch/alias identify the session); an empty leading bit is
+            # dropped by the " · ".join filter below.
+            if "trainer_name" not in claimed.columns:
+                claimed["trainer_name"] = None
             claimed["_locked_mi"] = False
             cal = pd.concat([cal, claimed[_SYNTH_COLS]], ignore_index=True, sort=False)
 
@@ -1433,7 +1476,8 @@ def _calendar_tab(user, role):
                 r = card["_rep"]
                 task = r["task_type"]
                 css = _task_css(task)
-                sub_bits = [_txt_safe(r.get("batch_code")), _txt_safe(r.get("c_alias")),
+                sub_bits = [_txt_safe(r.get("trainer_name")),
+                            _txt_safe(r.get("batch_code")), _txt_safe(r.get("c_alias")),
                             _txt_safe(r.get("slot_name")), _txt_safe(r.get("program_name"))]
                 if task == "other" and r.get("other_note"):
                     sub_bits.append(f"“{r['other_note']}”")
