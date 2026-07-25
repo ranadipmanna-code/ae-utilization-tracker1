@@ -745,6 +745,7 @@ def _css(t: dict, name: str = "light") -> str:
         font-weight:600; font-size:.74rem;
       }}
       .mi-accepted  {{ background:{t['claim_border']}; color:#04301f; }}
+      .mi-claimed   {{ background:{t['accent']}; color:{t['on_accent']}; }}
       .mi-rejected  {{ background:{t['other_border']}; color:#fff; }}
       .mi-resched   {{ background:{t['teach_border']}; color:#3a2400; }}
       .mi-takenby   {{ background:{t['accent_soft']}; color:{t['accent_text']}; }}
@@ -991,42 +992,50 @@ def dashboard():
     # be able to see what the Extended AEs have and haven't picked up, which
     # is exactly what was missing before.
     if role == "admin":
-        made = st.tabs(["📋  Sessions", "🎯  MI Pool", "👥  My Extended AE Team",
+        made = st.tabs(["📋  Sessions", "🎯  My Mock Interviews", "🎯  MI Pool",
+                        "👥  My Extended AE Team",
                         "📊  Weekly Summary", "📅  Calendar", "🔗  Email Health"])
         with made[0]:
             _sessions_tab(user, role)
         with made[1]:
-            mi_pool.render_mi_pool_tab(user, role)
+            _mock_interview_tab(user, role)
         with made[2]:
-            _rollup_tab(user, role)
+            mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
-            _summary_tab(user, role)
+            _rollup_tab(user, role)
         with made[4]:
-            _calendar_tab(user, role)
+            _summary_tab(user, role)
         with made[5]:
+            _calendar_tab(user, role)
+        with made[6]:
             _email_health_tab()
     elif role == "core_ae":
-        made = st.tabs(["📋  Sessions", "🎯  MI Pool", "👥  My Extended AE Team",
-                        "📊  Weekly Summary", "📅  Calendar"])
+        made = st.tabs(["📋  Sessions", "🎯  My Mock Interviews", "🎯  MI Pool",
+                        "👥  My Extended AE Team", "📊  Weekly Summary", "📅  Calendar"])
         with made[0]:
             _sessions_tab(user, role)
         with made[1]:
-            mi_pool.render_mi_pool_tab(user, role)
+            _mock_interview_tab(user, role)
         with made[2]:
-            _rollup_tab(user, role)
+            mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
-            _summary_tab(user, role)
+            _rollup_tab(user, role)
         with made[4]:
+            _summary_tab(user, role)
+        with made[5]:
             _calendar_tab(user, role)
     else:  # extended_ae
-        made = st.tabs(["📋  Sessions", "🎯  MI Pool", "🧭  My Alignment", "📅  Calendar"])
+        made = st.tabs(["📋  Sessions", "🎯  My Mock Interviews", "🎯  MI Pool",
+                        "🧭  My Alignment", "📅  Calendar"])
         with made[0]:
             _sessions_tab(user, role)
         with made[1]:
-            mi_pool.render_mi_pool_tab(user, role)
+            _mock_interview_tab(user, role)
         with made[2]:
-            _my_core_tab(user)
+            mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
+            _my_core_tab(user)
+        with made[4]:
             _calendar_tab(user, role)
 
 
@@ -1724,7 +1733,23 @@ def _sessions_tab(user, role):
 
     _sessions_table(sessions, core_ae_email, date_from, date_to, role, user["email"])
 
-    # Mock Interviews live BELOW the session selection now, for both roles.
+
+def _mock_interview_tab(user, role):
+    """Standalone 'My Mock Interviews' tab -- pulled out of the Sessions tab
+    so it stands on its own alongside Sessions / MI Pool / Calendar. A
+    person's Mock Interviews span every trainer, not just one Core AE's pod,
+    so this tab has no Core AE selector -- just a date window."""
+    st.markdown("### 🎯 My Mock Interviews")
+    ws, we = current_week_bounds()
+    c1, c2 = st.columns(2)
+    with c1:
+        date_from = st.date_input("From", value=ws, key="mi_tab_from")
+    with c2:
+        date_to = st.date_input("To", value=we + timedelta(days=7), key="mi_tab_to")
+    if date_from > date_to:
+        st.warning("‘From’ is after ‘To’.")
+        return
+    core_ae_email = db.core_ae_for_extended(user["email"]) if role == "extended_ae" else None
     _render_mock_interviews(user, role, core_ae_email, date_from, date_to)
 
 
