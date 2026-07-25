@@ -717,7 +717,15 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
         return (f"{d} · {b.get('slot_time') or ''} · "
                 f"{b.get('trainer_name') or 'Unknown'} · {b.get('batch_code') or ''}")
 
-    label_by_key = {r["mi_key"]: _row_label(r.to_dict()) for _, r in chunk.iterrows()}
+    # Only rows still OPEN (nobody holds them yet) can be acted on. Claimed
+    # rows stay VISIBLE in the table above -- so everyone sees "Taken by
+    # <name>" -- but drop out of the picker, since there's nothing left to
+    # do with them.
+    actionable = chunk[chunk["state"] == STATE_OPEN] if "state" in chunk.columns else chunk
+    label_by_key = {r["mi_key"]: _row_label(r.to_dict()) for _, r in actionable.iterrows()}
+    if not label_by_key:
+        st.caption("Every interview on this page is already taken — nothing open to act on here.")
+        return
     picked_keys = st.multiselect(
         "Select interviews to act on",
         options=list(label_by_key.keys()),
@@ -725,7 +733,7 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
         key=f"mi_pool_pick_{int(page)}",
     )
 
-    picked = [r.to_dict() for _, r in chunk.iterrows() if r["mi_key"] in picked_keys]
+    picked = [r.to_dict() for _, r in actionable.iterrows() if r["mi_key"] in picked_keys]
     if not picked:
         st.caption("Nothing selected yet.")
         return
