@@ -1778,9 +1778,10 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
             st.caption(
                 "Auto-assigned Mock Interview sessions for you to observe/evaluate — "
                 "these can be from any trainer, not just your own Core AE's pod. "
-                "Each starts as **Default** (pending) — pick **Selected** to put it "
-                "on your Calendar, or **Not Selected** to send it back to the MI pool "
-                "for someone else, then Save."
+                "Each starts as **Default** — pick **Selected** to put it on your "
+                "Calendar, or **Not Selected** to send it back to the MI pool for "
+                "someone else. You must decide **every** interview (none left on "
+                "Default) before your choices can be saved."
             )
             my_mi = my_mi.sort_values(["_date", "slot_time"]).reset_index(drop=True)
             row_meta: dict[str, tuple] = {}   # widget key -> (row, saved status)
@@ -1815,25 +1816,45 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                 row_meta[wkey] = (r, cur)
 
             if st.button("💾  Save my Mock Interview choices", type="primary", key="save_my_mi"):
-                changed = 0
+                # Validation gate: every interview must be decided (Selected or
+                # Not Selected) before ANY of them is saved. A list left with
+                # "Default" (Pending) rows half-done shouldn't persist -- the
+                # person has to consciously act on each one first.
+                undecided = []
                 for wkey, (row, cur) in row_meta.items():
-                    new_status = st.session_state.get(wkey, cur)
-                    if new_status == cur:
-                        continue
-                    db.upsert_mock_interview_assignment(
-                        user["email"], row["session_date"], row["slot_time"],
-                        row["batch_code"], row["c_alias"], row.get("trainer_email"),
-                        row.get("trainer_name"), row.get("program_name"),
-                        status=new_status, source="manual",
+                    live_val = st.session_state.get(wkey, cur)
+                    if live_val == "Pending":
+                        d = pd.to_datetime(row["_date"]).strftime("%a, %d %b")
+                        tr = (f"{row.get('f_name') or ''} {row.get('l_name') or ''}".strip()
+                              or "Unknown trainer")
+                        undecided.append(f"• {d} · {row['slot_time']} — {tr}")
+
+                if undecided:
+                    st.error(
+                        "Decide every interview before saving — set each to "
+                        "**Selected** or **Not Selected** (none may stay on "
+                        "**Default**). Still undecided:\n\n" + "\n".join(undecided)
                     )
-                    changed += 1
-                if changed:
-                    db.clear_app_caches()
-                    st.success(f"Updated {changed} Mock Interview selection"
-                               f"{'s' if changed != 1 else ''}.")
-                    st.rerun()
                 else:
-                    st.info("No changes to save.")
+                    changed = 0
+                    for wkey, (row, cur) in row_meta.items():
+                        new_status = st.session_state.get(wkey, cur)
+                        if new_status == cur:
+                            continue
+                        db.upsert_mock_interview_assignment(
+                            user["email"], row["session_date"], row["slot_time"],
+                            row["batch_code"], row["c_alias"], row.get("trainer_email"),
+                            row.get("trainer_name"), row.get("program_name"),
+                            status=new_status, source="manual",
+                        )
+                        changed += 1
+                    if changed:
+                        db.clear_app_caches()
+                        st.success(f"Saved — {changed} Mock Interview decision"
+                                   f"{'s' if changed != 1 else ''} recorded.")
+                        st.rerun()
+                    else:
+                        st.info("All interviews already decided — nothing new to save.")
 
     # A Core AE (and admin) can see the Mock Interviews their paired Extended
     # AEs have selected — e.g. what Pulak picks is visible to Arnab. Read-only.
