@@ -502,17 +502,16 @@ def _esc(v) -> str:
 def _status_cell(block: dict) -> str:
     """Column M 'Status' -- what the assigned Extended AE did with it.
 
-    Distinguishes two things the sheet's plain 'Accepted' can't: an AE
-    accepting the interview they were auto-assigned, versus a DIFFERENT AE
-    picking up one that was passed over (source='pool'). Both end up as
-    status='Selected' in the table, but they mean different things when
-    you're reading down the ladder.
+    A claimed interview shows "Taken by <name>" (the person who holds it),
+    matching the Google Sheet's wording exactly -- whether it was
+    auto-assigned and accepted, or picked up from the pool by a different
+    AE. The sheet doesn't distinguish those two; it just names the holder,
+    so neither do we.
     """
     st_ = str(block.get("ext_status") or "")
     if st_ == "Selected":
-        if str(block.get("ext_source") or "") == "pool":
-            return "<span class='mi-cell mi-claimed'>Claimed by Extended AE</span>"
-        return "<span class='mi-cell mi-accepted'>Accepted</span>"
+        who = _who(block.get("ext_ae")) or "Extended AE"
+        return f"<span class='mi-cell mi-takenby'>Taken by {_esc(who)}</span>"
     if st_ == "Not Selected":
         return "<span class='mi-cell mi-rejected'>Rejected</span>"
     if st_ == "Pending":
@@ -650,10 +649,12 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
         st.error(f"**{open_fac}** interview(s) reached the bottom of the ladder and need a trainer.")
 
     # ---- filters ---------------------------------------------------------
-    default_show = {
-        "extended_ae": "Open @ Extended AE",
-        "core_ae": "Open @ Core AE",
-    }.get(role, "Open — needs someone")
+    # Default to "Everything" for all roles: a claimed interview should stay
+    # visible in the sheet-style table (with "Taken by <name>" in its Status
+    # column), not disappear the instant someone claims it. The old per-role
+    # "Open @ ..." defaults hid claimed rows, which read as the row being
+    # deleted. People can still narrow to just-open rows via the Show filter.
+    default_show = "Everything"
 
     f1, f2, f3 = st.columns(3)
     with f1:
@@ -741,8 +742,7 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
     acted = False
     buttons = []
     if can_ext:
-        buttons += [("✅ Claim as Extended AE", "ext_take"),
-                    ("↩️ Pass to Core AE", "ext_pass")]
+        buttons += [("✅ Claim as Extended AE", "ext_take")]
     if can_core:
         buttons += [("✅ Take as Core AE", "core_take"),
                     ("👤 Hand to faculty", "core_pass")]
@@ -754,13 +754,12 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
                 continue
             try:
                 for b in picked:
-                    if action in ("ext_take", "ext_pass"):
+                    if action == "ext_take":
                         db.upsert_mock_interview_assignment(
                             email, b["date"], b["slot_time"], b.get("batch_code"),
                             b.get("c_alias"), b.get("trainer_email"),
                             b.get("trainer_name"), b.get("program_name"),
-                            status="Selected" if action == "ext_take" else "Not Selected",
-                            source="pool",
+                            status="Selected", source="pool",
                         )
                     elif action == "core_take":
                         upsert_pool_claim(b, "core_ae", email, status="Selected")
