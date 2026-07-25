@@ -298,6 +298,7 @@ def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
             if cur is None or (str(r["status"]) == "Selected"):
                 ext_by_key[k] = {
                     "ae": r["extended_ae_email"], "status": str(r["status"]),
+                    "source": str(r.get("source") or ""),
                 }
 
     # Stages 2 and 3.
@@ -343,6 +344,7 @@ def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
             **b,
             "ext_ae": e.get("ae", ""),
             "ext_status": ext_status,
+            "ext_source": e.get("source", ""),
             "core_ae": c.get("by", ""),
             "core_status": core_status,
             "faculty": f.get("by", ""),
@@ -498,9 +500,18 @@ def _esc(v) -> str:
 
 
 def _status_cell(block: dict) -> str:
-    """Column M 'Status' -- what the assigned Extended AE did with it."""
+    """Column M 'Status' -- what the assigned Extended AE did with it.
+
+    Distinguishes two things the sheet's plain 'Accepted' can't: an AE
+    accepting the interview they were auto-assigned, versus a DIFFERENT AE
+    picking up one that was passed over (source='pool'). Both end up as
+    status='Selected' in the table, but they mean different things when
+    you're reading down the ladder.
+    """
     st_ = str(block.get("ext_status") or "")
     if st_ == "Selected":
+        if str(block.get("ext_source") or "") == "pool":
+            return "<span class='mi-cell mi-claimed'>Claimed by Extended AE</span>"
         return "<span class='mi-cell mi-accepted'>Accepted</span>"
     if st_ == "Not Selected":
         return "<span class='mi-cell mi-rejected'>Rejected</span>"
