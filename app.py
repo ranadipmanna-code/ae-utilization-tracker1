@@ -962,46 +962,6 @@ def dashboard():
                 del st.session_state.user
                 st.rerun()
 
-        using_shared = st.session_state.get("_using_shared_password", True)
-        pw_label = "🔑 Set your own password" if using_shared else "🔑 Change password"
-        with st.expander(pw_label):
-            if using_shared:
-                st.caption(
-                    "You're currently signed in with the shared password. "
-                    "Set your own here for better security -- once you do, "
-                    "the shared password will no longer work for your account."
-                )
-            with st.form("change_pwd", clear_on_submit=True):
-                cur_pw = st.text_input("Current password", type="password", key="cp_cur")
-                new_pw1 = st.text_input("New password", type="password", key="cp_new1")
-                st.caption("At least 8 characters, with at least one letter and one number.")
-                new_pw2 = st.text_input("Confirm new password", type="password", key="cp_new2")
-                submitted = st.form_submit_button("Update password", use_container_width=True)
-            if submitted:
-                auth = db.get_user_auth(user["email"])
-                has_personal_pw = bool(auth and auth.get("password_hash") and auth.get("password_salt"))
-                cur_ok = (
-                    db.verify_password(cur_pw, auth["password_salt"], auth["password_hash"])
-                    if has_personal_pw
-                    else cur_pw == st.secrets["auth"]["shared_password"]
-                )
-                pw_valid = (
-                    len(new_pw1) >= 8
-                    and re.search(r"[A-Za-z]", new_pw1)
-                    and re.search(r"[0-9]", new_pw1)
-                )
-                if not cur_ok:
-                    st.error("Current password is incorrect.")
-                elif not pw_valid:
-                    st.error("New password must be at least 8 characters, with at least "
-                              "one letter and one number.")
-                elif new_pw1 != new_pw2:
-                    st.error("New passwords don't match.")
-                else:
-                    db.set_user_password(user["email"], new_pw1)
-                    st.session_state["_using_shared_password"] = False
-                    st.success("Password updated -- use your new password next time you sign in.")
-
         st.divider()
         _theme_toggle("theme_app")
         st.divider()
