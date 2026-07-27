@@ -658,6 +658,7 @@ def _interview_overlaps_busy(row: dict, busy: set) -> bool:
     return any((d, m) in busy for m in range(start, end, 30))
 
 
+@st.fragment
 def render_mi_pool_tab(user: dict, role: str) -> None:
     """The Mock Interview escalation pool.
 
