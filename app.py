@@ -1577,7 +1577,7 @@ def _sessions_tab(user, role):
     # late 2027 -- purely to read .min()/.max() off the frame, then discard
     # ~95% of it with a pandas filter. Every later pandas pass then paid for
     # rows nobody would ever see.
-    lo_d, hi_d, n_total = db.faculty_date_bounds(tuple(faculty))
+    lo_d, hi_d, n_total, _g_lo, _g_hi = db.sessions_tab_bounds(tuple(faculty))
     if not lo_d or not hi_d:
         st.info("No CMIS sessions found for this Core AE's faculty.")
         return
@@ -1592,9 +1592,10 @@ def _sessions_tab(user, role):
             default_from = lo_d
         # allow the picker to reach CMIS's global max (e.g. Oct 2027), not just
         # this AE's own last session — so future dates are always selectable.
-        g_lo, g_hi = db.cmis_date_bounds()
-        pick_min = g_lo or lo_d
-        pick_max = g_hi or hi_d
+        # (g_lo/g_hi came back from the same sessions_tab_bounds() call above
+        # that fetched lo_d/hi_d/n_total -- one connection, not two.)
+        pick_min = _g_lo or lo_d
+        pick_max = _g_hi or hi_d
         with d1:
             date_from = st.date_input("From", value=default_from, min_value=pick_min, max_value=pick_max)
         with d2:
