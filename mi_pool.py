@@ -327,15 +327,23 @@ def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
         # Walk the ladder from the bottom rung up: whoever most recently
         # accepted holds it; otherwise it sits open at the rung just below
         # the last person who passed.
+        #
+        # "Rejected" is treated exactly like "Not Selected" here -- both mean
+        # that rung's person isn't taking it, so the interview opens to the
+        # next rung down. The two labels differ only in the audit trail
+        # (declined-from-start vs. took-then-dropped); the cascade behaviour
+        # is identical.
+        _ext_declined = ext_status in ("Not Selected", "Rejected")
+        _core_declined = core_status in ("Not Selected", "Rejected")
         if fac_status == "Selected":
             stage, state, holder = STAGE_FACULTY, STATE_CLAIMED, f.get("by", "")
         elif core_status == "Selected":
             stage, state, holder = STAGE_CORE, STATE_CLAIMED, c.get("by", "")
         elif ext_status == "Selected":
             stage, state, holder = STAGE_EXT, STATE_CLAIMED, e.get("ae", "")
-        elif core_status == "Not Selected":
+        elif _core_declined:
             stage, state, holder = STAGE_FACULTY, STATE_OPEN, ""
-        elif ext_status == "Not Selected":
+        elif _ext_declined:
             stage, state, holder = STAGE_CORE, STATE_OPEN, ""
         else:
             stage, state, holder = STAGE_EXT, STATE_OPEN, ""
@@ -512,8 +520,10 @@ def _status_cell(block: dict) -> str:
     if st_ == "Selected":
         who = _who(block.get("ext_ae")) or "Extended AE"
         return f"<span class='mi-cell mi-takenby'>Taken by {_esc(who)}</span>"
-    if st_ == "Not Selected":
+    if st_ == "Rejected":
         return "<span class='mi-cell mi-rejected'>Rejected</span>"
+    if st_ == "Not Selected":
+        return "<span class='mi-cell mi-notsel'>Not Selected</span>"
     if st_ == "Pending":
         return "<span class='mi-cell mi-open'>Pending</span>"
     return "<span class='mi-cell mi-open'>—</span>"
@@ -658,7 +668,6 @@ def _interview_overlaps_busy(row: dict, busy: set) -> bool:
     return any((d, m) in busy for m in range(start, end, 30))
 
 
-@st.fragment
 def render_mi_pool_tab(user: dict, role: str) -> None:
     """The Mock Interview escalation pool.
 
