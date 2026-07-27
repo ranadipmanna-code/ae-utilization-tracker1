@@ -621,6 +621,29 @@ def _viewer_busy_marks(email: str, role: str, from_date, to_date) -> set:
     except Exception:
         pass
 
+    # Calendar-tab overrides (ae_slot_task): an evaluation/training/project/
+    # other set on the Calendar tab lives HERE, not in the selection tables.
+    # This is the source behind the "via Evaluation" badge -- and it was the
+    # gap: an evaluation added as a Calendar override wasn't being seen as
+    # busy, so a Mock Interview overlapping it still showed in the picker.
+    # Any override that isn't itself a mock_interview means the person is
+    # committed at that time.
+    try:
+        tasks = db.get_slot_tasks(email, from_date, to_date)
+        if not tasks.empty:
+            for _, r in tasks.iterrows():
+                if str(r.get("task_type") or "") == "mock_interview":
+                    continue
+                d = pd.to_datetime(r["session_date"]).date()
+                a, b = _slot_start_end(r.get("slot_time") or "")
+                sm, em = _to_minutes(a), _to_minutes(b)
+                if em <= sm:
+                    em = sm + 30
+                for m in range(sm, em, 30):
+                    marks.add((d, m))
+    except Exception:
+        pass
+
     return marks
 
 
