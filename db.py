@@ -207,6 +207,58 @@ def cmis_date_bounds() -> tuple[date | None, date | None]:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def sessions_tab_bounds(
+    faculty_emails: tuple[str, ...]
+) -> tuple[date | None, date | None, int, date | None, date | None]:
+    """Combines faculty_date_bounds + cmis_date_bounds into ONE connection
+    checkout instead of two.
+
+    The Sessions tab needs both every time it loads (faculty's own min/max/
+    count to size the picker, plus CMIS's global min/max so future dates
+    stay selectable). They used to be two separate `with cmis_engine()
+    .connect()` blocks -- each one pays a pool_pre_ping round-trip to the
+    remote CMIS host before the real query even runs. Same two queries,
+    same results, one checkout.
+
+    Returns (faculty_lo, faculty_hi, faculty_count, global_lo, global_hi) --
+    identical values to calling faculty_date_bounds(...) then
+    cmis_date_bounds() separately.
+    """
+    if not faculty_emails:
+        g_lo, g_hi = cmis_date_bounds()
+        return None, None, 0, g_lo, g_hi
+
+    placeholders = ", ".join(f":e{i}" for i in range(len(faculty_emails)))
+    params: dict[str, Any] = {f"e{i}": e for i, e in enumerate(faculty_emails)}
+    faculty_sql = text(
+        f"SELECT MIN(s_date) AS lo, MAX(s_date) AS hi, COUNT(*) AS n "
+        f"FROM {CMIS_VIEW} WHERE email_id IN ({placeholders})"
+    )
+    global_sql = text(f"SELECT MIN(s_date) AS lo, MAX(s_date) AS hi FROM {CMIS_VIEW}")
+
+    with cmis_engine().connect() as conn:
+        fdf = pd.read_sql(faculty_sql, conn, params=params)
+        gdf = pd.read_sql(global_sql, conn)
+
+    if fdf.empty:
+        f_lo, f_hi, f_n = None, None, 0
+    else:
+        lo, hi, n = fdf.iloc[0]["lo"], fdf.iloc[0]["hi"], int(fdf.iloc[0]["n"] or 0)
+        f_lo = pd.to_datetime(lo).date() if lo is not None else None
+        f_hi = pd.to_datetime(hi).date() if hi is not None else None
+        f_n = n
+
+    if gdf.empty:
+        g_lo, g_hi = None, None
+    else:
+        lo, hi = gdf.iloc[0]["lo"], gdf.iloc[0]["hi"]
+        g_lo = pd.to_datetime(lo).date() if lo is not None else None
+        g_hi = pd.to_datetime(hi).date() if hi is not None else None
+
+    return f_lo, f_hi, f_n, g_lo, g_hi
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_sessions_all(week_start: date, week_end: date, limit: int = 5000) -> pd.DataFrame:
     """All CMIS sessions in the window (admin overview)."""
     sql = text(
@@ -1597,25 +1649,19 @@ def get_team_extended_ae_activity(
     return sessions, mi
 
 
-@st.cache_data(ttl=45, show_spinner=False)
-def get_selections_for_emails(
-    role: str, emails: tuple[str, ...], from_date: date, to_date: date
+_EMPTY_SELECTIONS_COLS = [
+    "id", "owner_email", "session_date", "slot_time", "module", "batch_code", "status",
+]
+
+
+def _selections_for_emails_conn(
+    conn, role: str, emails: tuple[str, ...], from_date: date, to_date: date
 ) -> pd.DataFrame:
-    """Selections for MANY people in ONE query.
-
-    This exists because get_team_selections used to call
-    get_selections_for_role once per Extended AE. On a Core AE with ten
-    Extended AEs that was eleven uncached round-trips on *every* Streamlit
-    rerun -- every dropdown change, every checkbox, every page turn. Against a
-    remote MySQL that alone is most of a second of dead time per interaction.
-
-    One IN (...) query, cached briefly, replaces the whole loop.
-    """
+    """Same query as get_selections_for_emails, but runs on a connection the
+    CALLER already has open -- so a caller needing more than one role table
+    (get_team_selections) pays for one pool checkout, not one per table."""
     if not emails:
-        return pd.DataFrame(
-            columns=["id", "owner_email", "session_date", "slot_time",
-                     "module", "batch_code", "status"]
-        )
+        return pd.DataFrame(columns=_EMPTY_SELECTIONS_COLS)
     tbl, col = _sel_table(role)
     placeholders = ", ".join(f":e{i}" for i in range(len(emails)))
     params: dict[str, Any] = {f"e{i}": e for i, e in enumerate(emails)}
@@ -1628,13 +1674,31 @@ def get_selections_for_emails(
         f"WHERE session_date BETWEEN :a AND :b AND {col} IN ({placeholders})"
     )
     try:
-        with app_engine().connect() as conn:
-            return pd.read_sql(sql, conn, params=params)
+        return pd.read_sql(sql, conn, params=params)
     except Exception:
-        return pd.DataFrame(
-            columns=["id", "owner_email", "session_date", "slot_time",
-                     "module", "batch_code", "status"]
-        )
+        return pd.DataFrame(columns=_EMPTY_SELECTIONS_COLS)
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def get_selections_for_emails(
+    role: str, emails: tuple[str, ...], from_date: date, to_date: date
+) -> pd.DataFrame:
+    """Selections for MANY people in ONE query.
+
+    This exists because get_team_selections used to call
+    get_selections_for_role once per Extended AE. On a Core AE with ten
+    Extended AEs that was eleven uncached round-trips on *every* Streamlit
+    rerun -- every dropdown change, every checkbox, every page turn. Against a
+    remote MySQL that alone is most of a second of dead time per interaction.
+
+    One IN (...) query, cached briefly, replaces the whole loop. Unchanged
+    from before -- still opens its own connection, still cached exactly as
+    it was, for every existing caller of this function.
+    """
+    if not emails:
+        return pd.DataFrame(columns=_EMPTY_SELECTIONS_COLS)
+    with app_engine().connect() as conn:
+        return _selections_for_emails_conn(conn, role, emails, from_date, to_date)
 
 
 @st.cache_data(ttl=45, show_spinner=False)
@@ -1646,21 +1710,24 @@ def get_team_selections(core_ae_email: str, from_date: date, to_date: date) -> p
     so the UI can show "claimed by X" and lock editing to the owner.
 
     Two batched queries total, cached -- it used to be one per team member.
+    Both queries now run on ONE shared connection (see
+    _selections_for_emails_conn) instead of each opening its own -- same SQL,
+    same results, one pool_pre_ping round-trip to the remote appdb host
+    instead of two.
     """
     frames = []
+    ext_emails = tuple(extended_aes_for_core(core_ae_email))
+    core_emails = (core_ae_email,) if core_ae_email else ()
 
-    # Core AE's own picks
-    core = get_selections_for_emails(
-        "core_ae", (core_ae_email,) if core_ae_email else (), from_date, to_date
-    )
+    with app_engine().connect() as conn:
+        core = _selections_for_emails_conn(conn, "core_ae", core_emails, from_date, to_date)
+        ext = _selections_for_emails_conn(conn, "extended_ae", ext_emails, from_date, to_date)
+
     if not core.empty:
         core = core[["session_date", "slot_time", "batch_code", "status", "owner_email"]].copy()
         core["owner_role"] = "core_ae"
         frames.append(core)
 
-    # Extended AEs paired to this Core AE -- all of them in one go.
-    ext_emails = tuple(extended_aes_for_core(core_ae_email))
-    ext = get_selections_for_emails("extended_ae", ext_emails, from_date, to_date)
     if not ext.empty:
         ext = ext[["session_date", "slot_time", "batch_code", "status", "owner_email"]].copy()
         ext["owner_role"] = "extended_ae"
