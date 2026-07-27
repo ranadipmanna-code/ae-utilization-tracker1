@@ -747,6 +747,7 @@ def _css(t: dict, name: str = "light") -> str:
       .mi-accepted  {{ background:{t['claim_border']}; color:#04301f; }}
       .mi-claimed   {{ background:{t['accent']}; color:{t['on_accent']}; }}
       .mi-rejected  {{ background:{t['other_border']}; color:#fff; }}
+      .mi-notsel    {{ background:{t['chip_bg']}; color:{t['muted']}; }}
       .mi-resched   {{ background:{t['teach_border']}; color:#3a2400; }}
       .mi-takenby   {{ background:{t['accent_soft']}; color:{t['accent_text']}; }}
       .mi-yes       {{ background:{t['claim_border']}; color:#04301f; }}
@@ -1036,7 +1037,6 @@ def dashboard():
             _calendar_tab(user, role)
 
 
-@st.fragment
 def _summary_tab(user, role):
     st.markdown("### Weekly Summary")
     st.caption("Auto-maintained in `weekly_ae_summary` — updates whenever a session is claimed.")
@@ -1074,7 +1074,6 @@ def _summary_tab(user, role):
     st.dataframe(view, use_container_width=True, hide_index=True)
 
 
-@st.fragment
 def _email_health_tab():
     """Admin-only. Read-only diagnostic: which user_roles / core_ae_faculty_map
     emails have no matching email_id in CMIS, so their Calendar/Sessions data
@@ -1144,7 +1143,6 @@ def _week_bounds_now():
     return ws, we
 
 
-@st.fragment
 def _rollup_tab(user, role):
     core_options = _core_options_for(role, user["email"])
     if not core_options:
@@ -1190,7 +1188,6 @@ def _rollup_tab(user, role):
     _team_rollup(core_ae_email, ws, we)
 
 
-@st.fragment
 def _my_core_tab(user):
     """For an Extended AE: show which Core AE(s) they're aligned with + teammates."""
     st.markdown("### 🧭 My Alignment")
@@ -1313,7 +1310,6 @@ def _merge_calendar_runs(grp: pd.DataFrame) -> list[dict]:
     return runs
 
 
-@st.fragment
 def _calendar_tab(user, role):
     st.markdown("### 📅 Calendar — CMIS task defaults & assignment")
 
@@ -1556,7 +1552,6 @@ def _cal_label(task_type: str) -> str:
     return db.TASK_LABELS.get(task_type, task_type)
 
 
-@st.fragment
 def _sessions_tab(user, role):
     core_options = _core_options_for(role, user["email"])
     if not core_options:
@@ -1577,7 +1572,7 @@ def _sessions_tab(user, role):
     # late 2027 -- purely to read .min()/.max() off the frame, then discard
     # ~95% of it with a pandas filter. Every later pandas pass then paid for
     # rows nobody would ever see.
-    lo_d, hi_d, n_total, _g_lo, _g_hi = db.sessions_tab_bounds(tuple(faculty))
+    lo_d, hi_d, n_total = db.faculty_date_bounds(tuple(faculty))
     if not lo_d or not hi_d:
         st.info("No CMIS sessions found for this Core AE's faculty.")
         return
@@ -1592,10 +1587,9 @@ def _sessions_tab(user, role):
             default_from = lo_d
         # allow the picker to reach CMIS's global max (e.g. Oct 2027), not just
         # this AE's own last session — so future dates are always selectable.
-        # (g_lo/g_hi came back from the same sessions_tab_bounds() call above
-        # that fetched lo_d/hi_d/n_total -- one connection, not two.)
-        pick_min = _g_lo or lo_d
-        pick_max = _g_hi or hi_d
+        g_lo, g_hi = db.cmis_date_bounds()
+        pick_min = g_lo or lo_d
+        pick_max = g_hi or hi_d
         with d1:
             date_from = st.date_input("From", value=default_from, min_value=pick_min, max_value=pick_max)
         with d2:
@@ -1745,7 +1739,6 @@ def _sessions_tab(user, role):
     _sessions_table(sessions, core_ae_email, date_from, date_to, role, user["email"])
 
 
-@st.fragment
 def _mock_interview_tab(user, role):
     """Standalone 'My Mock Interviews' tab -- pulled out of the Sessions tab
     so it stands on its own alongside Sessions / MI Pool / Calendar. A
@@ -1779,9 +1772,35 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                     recolours to match before Save.
     Core AE/admin -> read-only view of what their Extended AE team has picked.
     """
-    mi_opts = ["Pending", "Selected", "Not Selected"]
-    mi_labels = {"Pending": "Default", "Selected": "Selected", "Not Selected": "Not Selected"}
-    mi_card_cls = {"Pending": "scard-avail", "Selected": "scard-mine", "Not Selected": "scard-declined"}
+    # Status vocabulary and colours. "Rejected" is a distinct state from
+    # "Not Selected": Not Selected = declined from the start (never
+    # committed); Rejected = was Selected, then backed out. Both route to the
+    # MI pool and both read as "declined" operationally -- the difference is
+    # purely the audit trail in the Anudip DB, so we can tell whether someone
+    # never wanted an interview or took it and dropped it.
+    mi_labels = {"Pending": "Default", "Selected": "Selected",
+                 "Not Selected": "Not Selected", "Rejected": "Rejected"}
+    mi_card_cls = {"Pending": "scard-avail", "Selected": "scard-mine",
+                   "Not Selected": "scard-declined", "Rejected": "scard-declined"}
+
+    def _options_for(saved_status: str, live_status: str) -> list[str]:
+        """The dropdown choices available to a row, given its SAVED status
+        (what's in the DB) and its LIVE status (what the dropdown currently
+        shows this run). The 'back out' option is 'Rejected' once the row has
+        EVER been Selected -- i.e. its saved OR live status is Selected/
+        Rejected -- otherwise it's 'Not Selected'.
+
+        - fresh (Pending, never touched): Default / Not Selected / Selected
+        - declined from start (Not Selected): Not Selected / Selected
+        - has been Selected (Selected or Rejected): Selected / Rejected
+        """
+        ever_selected = saved_status in ("Selected", "Rejected") or \
+            live_status in ("Selected", "Rejected")
+        if ever_selected:
+            return ["Selected", "Rejected"]
+        if saved_status == "Not Selected" or live_status == "Not Selected":
+            return ["Not Selected", "Selected"]
+        return ["Pending", "Not Selected", "Selected"]
 
     if role == "extended_ae":
         my_mi = db.get_my_mock_interview_claims(user["email"], date_from, date_to)
@@ -1791,9 +1810,10 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                 "Auto-assigned Mock Interview sessions for you to observe/evaluate — "
                 "these can be from any trainer, not just your own Core AE's pod. "
                 "Each starts as **Default** — pick **Selected** to put it on your "
-                "Calendar, or **Not Selected** to send it back to the MI pool for "
-                "someone else. You must decide **every** interview (none left on "
-                "Default) before your choices can be saved."
+                "Calendar, or **Not Selected** to send it back to the MI pool. Once "
+                "you've **Selected** one, backing out is recorded as **Rejected** "
+                "(so we can tell it apart from one you never took). You must decide "
+                "**every** interview (none left on Default) before saving."
             )
             my_mi = my_mi.sort_values(["_date", "slot_time"]).reset_index(drop=True)
             row_meta: dict[str, tuple] = {}   # widget key -> (row, saved status)
@@ -1801,10 +1821,16 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                 trainer = f"{r.get('f_name') or ''} {r.get('l_name') or ''}".strip() or "Unknown trainer"
                 day_lbl = pd.to_datetime(r["_date"]).strftime("%a, %d %b")
                 wkey = f"mi_{r['id']}"
-                cur = r["status"] if r["status"] in mi_opts else "Pending"
+                cur = r["status"] if r["status"] in mi_labels else "Pending"
                 # Live value: whatever the dropdown holds this run (falls back to
                 # the saved status on first render). Drives the card colour.
                 live = st.session_state.get(wkey, cur)
+                opts = _options_for(cur, live)
+                # If the live value fell out of the allowed set (e.g. it was
+                # "Pending" but the row has since been Selected), snap to the
+                # first valid option.
+                if live not in opts:
+                    live = opts[0]
                 card_cls = mi_card_cls.get(live, "scard-avail")
                 meta_bits = [trainer, r.get("batch_code") or "", r.get("c_alias") or "",
                              r.get("program_name") or ""]
@@ -1821,7 +1847,7 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                     # No st.form here — a plain selectbox reruns on change, so the
                     # card can recolour instantly. Save is a normal button below.
                     st.selectbox(
-                        "status", mi_opts, index=mi_opts.index(cur),
+                        "status", opts, index=opts.index(live),
                         format_func=lambda o: mi_labels.get(o, o),
                         key=wkey, label_visibility="collapsed",
                     )
