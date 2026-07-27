@@ -578,6 +578,63 @@ def _sheet_table_html(view: pd.DataFrame, me: str) -> str:
     )
 
 
+def _viewer_busy_marks(email: str, role: str, from_date, to_date) -> set:
+    """Every (date, half-hour-start-minute) the viewer is already committed
+    to that week -- their own CMIS teaching slots plus any evaluation
+    sessions they've claimed. Used to hide Mock Interviews from the pool
+    picker when the viewer isn't actually free at that time.
+
+    Slot-level, not day-level: a person teaching 2-4 PM is still free for a
+    10 AM-12 PM interview that same day, so only the overlapping half-hours
+    count as busy -- matching how the allocator checks conflicts.
+    """
+    marks: set = set()
+
+    # Own CMIS teaching slots.
+    try:
+        own = db.get_member_own_slots(email, from_date, to_date)
+        for _, r in own.iterrows():
+            d = pd.to_datetime(r["s_date"]).date()
+            a, b = _slot_start_end(r.get("slot_time") or "")
+            sm, em = _to_minutes(a), _to_minutes(b)
+            if em <= sm:
+                em = sm + 30
+            for m in range(sm, em, 30):
+                marks.add((d, m))
+    except Exception:
+        pass  # a failed lookup shouldn't blank the whole pool -- just skip
+
+    # Claimed evaluation sessions (observing someone else -- also a real
+    # commitment at that time).
+    try:
+        sel = db.get_selections_for_role(role, email, from_date, to_date)
+        if not sel.empty:
+            live = sel[sel["status"].isin(["Selected", "Confirmed"])]
+            for _, r in live.iterrows():
+                d = pd.to_datetime(r["session_date"]).date()
+                a, b = _slot_start_end(r.get("slot_time") or "")
+                sm, em = _to_minutes(a), _to_minutes(b)
+                if em <= sm:
+                    em = sm + 30
+                for m in range(sm, em, 30):
+                    marks.add((d, m))
+    except Exception:
+        pass
+
+    return marks
+
+
+def _interview_overlaps_busy(row: dict, busy: set) -> bool:
+    """True if this interview's time span collides with any busy half-hour."""
+    d = pd.to_datetime(row["date"]).date()
+    start = int(row.get("start_min") or 0)
+    a, b = _slot_start_end(row.get("slot_time") or "")
+    end = _to_minutes(b)
+    if end <= start:
+        end = start + 30
+    return any((d, m) in busy for m in range(start, end, 30))
+
+
 def render_mi_pool_tab(user: dict, role: str) -> None:
     """The Mock Interview escalation pool.
 
@@ -722,9 +779,26 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
     # <name>" -- but drop out of the picker, since there's nothing left to
     # do with them.
     actionable = chunk[chunk["state"] == STATE_OPEN] if "state" in chunk.columns else chunk
+
+    # Slot-level availability filter: an Extended AE only sees interviews in
+    # the picker where they're actually FREE -- no own teaching and no
+    # claimed evaluation overlapping that time. (A person teaching 2-4 PM
+    # can still take a 10-12 interview the same day; only real time
+    # collisions are hidden.) Core AE / admin aren't filtered this way --
+    # they're triaging the whole pool, not taking interviews themselves.
+    if role == "extended_ae" and not actionable.empty:
+        busy = _viewer_busy_marks(email, role, date_from, date_to)
+        if busy:
+            actionable = actionable[
+                ~actionable.apply(lambda r: _interview_overlaps_busy(r.to_dict(), busy), axis=1)
+            ]
     label_by_key = {r["mi_key"]: _row_label(r.to_dict()) for _, r in actionable.iterrows()}
     if not label_by_key:
-        st.caption("Every interview on this page is already taken — nothing open to act on here.")
+        if role == "extended_ae":
+            st.caption("Nothing open for you to take on this page — the interviews here "
+                       "are either already taken, or clash with your own training/evaluation.")
+        else:
+            st.caption("Every interview on this page is already taken — nothing open to act on here.")
         return
     picked_keys = st.multiselect(
         "Select interviews to act on",
