@@ -1036,6 +1036,7 @@ def dashboard():
             _calendar_tab(user, role)
 
 
+@st.fragment
 def _summary_tab(user, role):
     st.markdown("### Weekly Summary")
     st.caption("Auto-maintained in `weekly_ae_summary` — updates whenever a session is claimed.")
@@ -1073,6 +1074,7 @@ def _summary_tab(user, role):
     st.dataframe(view, use_container_width=True, hide_index=True)
 
 
+@st.fragment
 def _email_health_tab():
     """Admin-only. Read-only diagnostic: which user_roles / core_ae_faculty_map
     emails have no matching email_id in CMIS, so their Calendar/Sessions data
@@ -1142,6 +1144,7 @@ def _week_bounds_now():
     return ws, we
 
 
+@st.fragment
 def _rollup_tab(user, role):
     core_options = _core_options_for(role, user["email"])
     if not core_options:
@@ -1187,6 +1190,7 @@ def _rollup_tab(user, role):
     _team_rollup(core_ae_email, ws, we)
 
 
+@st.fragment
 def _my_core_tab(user):
     """For an Extended AE: show which Core AE(s) they're aligned with + teammates."""
     st.markdown("### 🧭 My Alignment")
@@ -1309,6 +1313,7 @@ def _merge_calendar_runs(grp: pd.DataFrame) -> list[dict]:
     return runs
 
 
+@st.fragment
 def _calendar_tab(user, role):
     st.markdown("### 📅 Calendar — CMIS task defaults & assignment")
 
@@ -1551,6 +1556,7 @@ def _cal_label(task_type: str) -> str:
     return db.TASK_LABELS.get(task_type, task_type)
 
 
+@st.fragment
 def _sessions_tab(user, role):
     core_options = _core_options_for(role, user["email"])
     if not core_options:
@@ -1738,6 +1744,7 @@ def _sessions_tab(user, role):
     _sessions_table(sessions, core_ae_email, date_from, date_to, role, user["email"])
 
 
+@st.fragment
 def _mock_interview_tab(user, role):
     """Standalone 'My Mock Interviews' tab -- pulled out of the Sessions tab
     so it stands on its own alongside Sessions / MI Pool / Calendar. A
