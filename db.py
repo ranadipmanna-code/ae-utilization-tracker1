@@ -1072,6 +1072,7 @@ MOCK_INTERVIEW_ALIASES = ("plr_mi1", "plr_mi2", "plr_mi_save")
 
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_all_mock_interview_sessions(from_date: date, to_date: date) -> pd.DataFrame:
     """Every CMIS row in the range whose c_alias is a Mock Interview alias,
     from ANY trainer system-wide — the candidate pool auto-assignment draws
@@ -1590,6 +1591,7 @@ def get_member_own_slots(member_email: str, from_date: date, to_date: date) -> p
         return pd.read_sql(sql, conn, params={"e": member_email, "a": from_date, "b": to_date})
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_slot_tasks(member_email: str, from_date: date, to_date: date) -> pd.DataFrame:
     """Only the OVERRIDE rows for this member/period (may be sparse)."""
     sql = text(
@@ -1607,6 +1609,7 @@ def get_slot_tasks(member_email: str, from_date: date, to_date: date) -> pd.Data
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def resolve_member_calendar(member_email: str, from_date: date, to_date: date) -> pd.DataFrame:
     """
     Every one of this member's own CMIS slots for the window, with the
@@ -2081,6 +2084,8 @@ _APP_DB_CACHED = (
     "get_delegated_to_extended",
     "get_mock_interview_assignments",
     "get_my_mock_interview_claims",
+    "get_slot_tasks",
+    "resolve_member_calendar",
 )
 
 # (Auto-assignment was removed -- Mock Interviews are now always a manual
