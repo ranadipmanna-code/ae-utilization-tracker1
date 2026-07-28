@@ -1226,29 +1226,56 @@ def _my_core_tab(user):
 
 
 
-def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool:
-    """Mock Interview candidates as the SAME card style as _sessions_table's
-    Evaluation cards (scard / pill-mine / pill-lock / pill-avail / slot-head
-    CSS classes) -- grouped by trainer, one card per (merged) session, a
-    Selected/Not Selected control per card, Save at the bottom.
+def _status_options_for(saved_status: str, live_status: str) -> list[str]:
+    """The dropdown choices available to a row, given its SAVED status (in
+    the DB) and its LIVE status (currently shown). The 'back out' option is
+    'Rejected' once the row has EVER been Selected -- otherwise it's
+    'Not Selected'. Same progression the Evaluations tab uses:
 
-    Returns whether Save was pressed; the caller writes ONE row per merged
-    card (keyed by the whole span, matching mock_interview_assignment's
-    storage convention) -- not fanned across 30-min fragments, unlike the
-    Evaluation save path.
+    - fresh (never touched): Not Selected / Selected
+    - has been Selected (Selected or Rejected): Selected / Rejected
+
+    Once something is Selected, the person must explicitly Reject it rather
+    than quietly sliding back to "Not Selected" -- so the audit trail shows
+    whether an interview was never wanted or was taken and then dropped.
+    """
+    ever_selected = saved_status in ("Selected", "Rejected") or live_status in ("Selected", "Rejected")
+    if ever_selected:
+        return ["Selected", "Rejected"]
+    return ["Not Selected", "Selected"]
+
+
+def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool:
+    """Mock Interview candidates as cards (scard / pill-mine / pill-lock /
+    pill-avail / slot-head CSS classes) -- grouped by trainer, one card per
+    merged session.
+
+    Each card saves INDEPENDENTLY through its own button -- not through one
+    shared multi-row form. This is what makes picking two different
+    trainers' sessions in the same visit both actually take effect, rather
+    than only whichever one happened to survive a shared form submission.
+
+    Status is three-state, matching the Evaluations tab's own progression
+    (see _status_options_for): once Selected, backing out means explicitly
+    choosing Rejected rather than quietly reverting to Not Selected. A
+    Remarks box appears whenever the chosen status is Not Selected or
+    Rejected, and is saved alongside it.
+
+    Returns whether ANY card was saved this run (the caller can show a
+    success message; the rerun already happens inside here).
     """
     if df.empty:
         return False
 
-    # Ownership across EVERY Extended AE for this day -- same "who holds
-    # this slot" lookup _sessions_table does via get_team_selections, just
-    # against the dedicated MI table instead.
     existing = db.get_mock_interview_assignments(None, df["_date"].min(), df["_date"].max())
-    status_by_key: dict[str, tuple[str, str]] = {}
+    status_by_key: dict[str, dict] = {}
     if not existing.empty:
         for _, s in existing.iterrows():
             k = f"{s['session_date']}|{s['slot_time']}|{s['batch_code'] or ''}"
-            status_by_key[k] = (s["status"], s["extended_ae_email"])
+            status_by_key[k] = {
+                "status": s["status"], "owner": s["extended_ae_email"],
+                "remarks": s.get("remarks"),
+            }
 
     def _txt(v) -> str:
         if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -1260,76 +1287,106 @@ def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool
     d["Trainer"] = (d["f_name"].fillna("") + " " + d["l_name"].fillna("")).str.strip()
     d["Duration"] = d.apply(_fmt_duration, axis=1)
 
-    pending: dict = {}
-    with st.form(f"{key_prefix}_form"):
-        for trainer, grp in d.groupby("Trainer", sort=False):
-            first = grp.iloc[0]
-            st.markdown(
-                f"<div class='slot-head'>\U0001F464 {trainer or _txt(first.get('email_id')) or 'Unknown trainer'}"
-                f" &nbsp;\u00b7&nbsp; <span class='slot-count'>{len(grp)} session"
-                f"{'s' if len(grp) != 1 else ''}</span></div>",
-                unsafe_allow_html=True,
-            )
-            for _, r in grp.iterrows():
-                b = r.get("batch_code") or ""
-                # KEY BY THE WHOLE MERGED SPAN, not per 30-min fragment --
-                # mock_interview_assignment stores one row per whole block
-                # (matching merge_mi_blocks' mi_key, which the Mock
-                # Interview pool table also keys on), so a 2-hour interview
-                # is ONE row with slot_time="10:00 AM - 12:00 PM", not four
-                # rows for each 30-min fragment.
-                k = f"{r['_date']}|{r['slot_time']}|{b}"
-                status, owner = status_by_key.get(k, ("Not Selected", None))
+    any_saved = False
+    for trainer, grp in d.groupby("Trainer", sort=False):
+        first = grp.iloc[0]
+        st.markdown(
+            f"<div class='slot-head'>\U0001F464 {trainer or _txt(first.get('email_id')) or 'Unknown trainer'}"
+            f" &nbsp;\u00b7&nbsp; <span class='slot-count'>{len(grp)} session"
+            f"{'s' if len(grp) != 1 else ''}</span></div>",
+            unsafe_allow_html=True,
+        )
+        for _, r in grp.iterrows():
+            b = r.get("batch_code") or ""
+            # KEY BY THE WHOLE MERGED SPAN, not per 30-min fragment --
+            # mock_interview_assignment stores one row per whole block
+            # (matching merge_mi_blocks' mi_key, which the Mock Interview
+            # pool table also keys on).
+            k = f"{r['_date']}|{r['slot_time']}|{b}"
+            existing_row = status_by_key.get(k, {})
+            status = existing_row.get("status", "Not Selected")
+            owner = existing_row.get("owner")
+            saved_remarks = existing_row.get("remarks") or ""
 
-                claimed_row = status in CLAIMED
-                editable = (not owner) or (owner.lower() == user_email.lower())
-                if owner and claimed_row:
-                    who = ("<span class='pill pill-mine'>\u2605 Mine</span>"
-                           if owner.lower() == user_email.lower()
-                           else f"<span class='pill pill-lock'>\U0001F512 {owner.split('@')[0]}</span>")
-                elif not claimed_row:
-                    who = "<span class='pill pill-avail'>\u25f7 Available</span>"
-                else:
-                    who = ""
+            claimed_row = status in CLAIMED
+            editable = (not owner) or (owner.lower() == user_email.lower())
+            if owner and claimed_row:
+                who = ("<span class='pill pill-mine'>\u2605 Mine</span>"
+                       if owner.lower() == user_email.lower()
+                       else f"<span class='pill pill-lock'>\U0001F512 {owner.split('@')[0]}</span>")
+            elif not claimed_row:
+                who = "<span class='pill pill-avail'>\u25f7 Available</span>"
+            else:
+                who = ""
 
-                day_lbl = pd.to_datetime(r["_date"]).strftime("%a, %d %b")
-                sub_bits = [r["Duration"], f"<b>{_txt(r.get('batch_code'))}</b>"]
-                for extra in (_txt(r.get("c_alias")), _txt(r.get("program_name"))):
-                    if extra:
-                        sub_bits.append(extra)
-                sub_line = " \u00b7 ".join(b for b in sub_bits if b and b != "<b></b>")
+            day_lbl = pd.to_datetime(r["_date"]).strftime("%a, %d %b")
+            sub_bits = [r["Duration"], f"<b>{_txt(r.get('batch_code'))}</b>"]
+            for extra in (_txt(r.get("c_alias")), _txt(r.get("program_name"))):
+                if extra:
+                    sub_bits.append(extra)
+            sub_line = " \u00b7 ".join(bit for bit in sub_bits if bit and bit != "<b></b>")
 
-                cA, cB = st.columns([4, 1.3])
-                with cA:
-                    st.markdown(
-                        f"""<div class="scard {'scard-mine' if (owner and owner.lower()==user_email.lower()) else ('scard-lock' if claimed_row else 'scard-avail')} scard-mi">
-                          <div class="scard-top">\U0001F551 {day_lbl} &nbsp;\u00b7&nbsp; {_txt(r.get('slot_time'))} {who}</div>
-                          <div class="scard-sub">{sub_line}</div>
-                        </div>""",
-                        unsafe_allow_html=True,
+            cA, cB = st.columns([4, 1.3])
+            with cA:
+                st.markdown(
+                    f"""<div class="scard {'scard-mine' if (owner and owner.lower()==user_email.lower()) else ('scard-lock' if claimed_row else 'scard-avail')} scard-mi">
+                      <div class="scard-top">\U0001F551 {day_lbl} &nbsp;\u00b7&nbsp; {_txt(r.get('slot_time'))} {who}</div>
+                      <div class="scard-sub">{sub_line}</div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+            with cB:
+                if not editable:
+                    st.markdown(f"<div class='locked-status'>{status}</div>", unsafe_allow_html=True)
+
+            if not editable:
+                st.divider()
+                continue
+
+            # Own independent status control + optional remarks + Save,
+            # isolated to THIS row only -- a key collision between two
+            # different rows is impossible since k already encodes
+            # date|slot_time|batch_code, and row_key below is built from it.
+            row_key = f"{key_prefix}_{k}"
+            options = _status_options_for(status, status)
+            default_idx = options.index(status) if status in options else 0
+
+            c1, c2, c3 = st.columns([1.3, 2.2, 1])
+            with c1:
+                sel = st.selectbox(
+                    "Status", options, index=default_idx,
+                    key=f"{row_key}_sel", label_visibility="collapsed",
+                )
+            remarks_val = saved_remarks
+            if sel in ("Not Selected", "Rejected"):
+                with c2:
+                    remarks_val = st.text_input(
+                        "Remarks", value=saved_remarks,
+                        key=f"{row_key}_remarks", label_visibility="collapsed",
+                        placeholder="Reason for not taking this interview (optional)",
                     )
-                with cB:
-                    if editable:
-                        options = ["Not Selected", "Selected"]
-                        default_idx = 1 if claimed_row else 0
-                        key = f"{r['_date']}|{r['slot_time']}|{b}"
-                        sel = st.selectbox(
-                            "status", options, index=default_idx,
-                            key=f"{key_prefix}_st_{key}", label_visibility="collapsed",
-                        )
-                        if sel != options[default_idx]:
-                            pending[key] = (sel, r)
-                    else:
-                        st.markdown(
-                            f"<div class='locked-status'>{status}</div>",
-                            unsafe_allow_html=True,
-                        )
+            with c3:
+                if st.button("\U0001F4BE Save", key=f"{row_key}_save", use_container_width=True):
+                    db.upsert_mock_interview_assignment(
+                        extended_ae_email=user_email,
+                        session_date=r["_date"],
+                        slot_time=r["slot_time"],
+                        batch_code=r.get("batch_code"),
+                        c_alias=r.get("c_alias"),
+                        trainer_email=r.get("email_id"),
+                        trainer_name=(str(r.get("f_name") or "") + " " + str(r.get("l_name") or "")).strip(),
+                        program_name=r.get("program_name"),
+                        status=sel,
+                        source="manual",
+                        remarks=remarks_val if sel in ("Not Selected", "Rejected") else None,
+                    )
+                    db.clear_app_caches()
+                    st.success(f"Saved: {sel}.")
+                    any_saved = True
+                    st.rerun()
+            st.divider()
 
-        saved = st.form_submit_button("\U0001F4BE Save changes", type="primary", use_container_width=True)
-
-    if saved and pending:
-        st.session_state[f"{key_prefix}_pending"] = pending
-    return saved and bool(pending)
+    return any_saved
 
 
 def _render_training_cards(df: pd.DataFrame, key_prefix: str) -> None:
@@ -1592,35 +1649,10 @@ def _calendar_wizard_tab(user, role):
         st.caption("No Mock Interview sessions in the remaining free time on this day.")
     else:
         mi_display = _merge_consecutive(mi_candidates)
-        mi_key_prefix = "cal_wizard_mi"
-        saved = _render_mi_cards(mi_display, email, mi_key_prefix)
-        if saved:
-            pending = st.session_state.pop(f"{mi_key_prefix}_pending", {})
-            if not pending:
-                st.info("No changes to save \u2014 pick a status on a session first.")
-            else:
-                for _key, (new_status, r) in pending.items():
-                    # ONE row per merged block, keyed by the whole span --
-                    # matching merge_mi_blocks' mi_key format exactly, so
-                    # the Mock Interview pool table's lookup finds it and
-                    # shows "Taken by <name>" / "Not Selected" correctly.
-                    # (Evaluation fans across 30-min fragments because that
-                    # table is keyed per-fragment; this one is not.)
-                    db.upsert_mock_interview_assignment(
-                        extended_ae_email=email,
-                        session_date=r["_date"],
-                        slot_time=r["slot_time"],
-                        batch_code=r.get("batch_code"),
-                        c_alias=r.get("c_alias"),
-                        trainer_email=r.get("email_id"),
-                        trainer_name=(str(r.get("f_name") or "") + " " + str(r.get("l_name") or "")).strip(),
-                        program_name=r.get("program_name"),
-                        status=new_status,
-                        source="manual",
-                    )
-                db.clear_app_caches()
-                st.success(f"Saved {len(pending)} change{'s' if len(pending) != 1 else ''}.")
-                st.rerun()
+        # Saving now happens per-card, independently, inside
+        # _render_mi_cards itself (including its own st.rerun()) -- no
+        # pending/session_state hand-off needed here anymore.
+        _render_mi_cards(mi_display, email, key_prefix="cal_wizard_mi")
 
     st.divider()
 
