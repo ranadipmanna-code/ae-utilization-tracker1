@@ -1335,9 +1335,56 @@ def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool
     return saved and bool(pending)
 
 
+def _render_training_cards(df: pd.DataFrame, key_prefix: str) -> None:
+    """Training sessions as the SAME card style as the Evaluation/Mock
+    Interview cards (scard / slot-head CSS classes) -- view-only, no status
+    control, since training is fixed and never claimable.
+    """
+    if df.empty:
+        return
+
+    def _txt(v) -> str:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        s = str(v).strip()
+        return "" if s.lower() in ("nan", "none", "null") else s
+
+    d = df.copy()
+    d["Trainer"] = (d["f_name"].fillna("") + " " + d["l_name"].fillna("")).str.strip() \
+        if "f_name" in d.columns else d.get("trainer_name", "")
+    d["Duration"] = d.apply(_fmt_duration, axis=1)
+
+    for trainer, grp in d.groupby("Trainer", sort=False) if "Trainer" in d.columns else []:
+        first = grp.iloc[0]
+        st.markdown(
+            f"<div class='slot-head'>\U0001F464 {trainer or 'You'}"
+            f" &nbsp;\u00b7&nbsp; <span class='slot-count'>{len(grp)} session"
+            f"{'s' if len(grp) != 1 else ''}</span></div>",
+            unsafe_allow_html=True,
+        )
+        for _, r in grp.iterrows():
+            day_lbl = pd.to_datetime(r["_date"]).strftime("%a, %d %b")
+            sub_bits = [r["Duration"], f"<b>{_txt(r.get('batch_code'))}</b>"]
+            for extra in (_txt(r.get("c_alias")), _txt(r.get("slot_name")), _txt(r.get("program_name"))):
+                if extra:
+                    sub_bits.append(extra)
+            sub_line = " \u00b7 ".join(b for b in sub_bits if b and b != "<b></b>")
+            st.markdown(
+                f"""<div class="scard scard-lock">
+                  <div class="scard-top">\U0001F551 {day_lbl} &nbsp;\u00b7&nbsp; {_txt(r.get('slot_time'))}
+                  <span class="pill pill-lock">\U0001F3EB Training</span></div>
+                  <div class="scard-sub">{sub_line}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+
 def _calendar_wizard_tab(user, role):
-    """Single-day wizard: Training (locked) -> Evaluation (free time) ->
-    Mock Interview (whatever free time is left after any evaluation pick).
+    """Single-day view: Training (fixed, card view) -> Mock Interview ->
+    Evaluation. All three sections are always visible together (not gated
+    behind each other) -- each has its own independent Save button, and both
+    Mock Interview and Evaluation draw candidates from the same free-time
+    set (whatever is left after Training).
 
     A slot counts as TRAINING only when its CMIS-derived default is
     'teaching' -- everything else (including times with no CMIS row for this
@@ -1353,9 +1400,7 @@ def _calendar_wizard_tab(user, role):
 
     # Evaluation candidates must be scoped to the trainers this person is
     # actually aligned with -- exactly the same core_ae_faculty_map lookup
-    # the Evaluations tab uses. Without this, "free time" pulled from every
-    # CMIS session nationwide, which is correct for the Mock Interview step
-    # below but wrong for Evaluation.
+    # the Evaluations tab uses. Mock Interview stays nationwide by design.
     core_options = _core_options_for(role, email)
     core_ae_email = core_options[0] if core_options else None
     if len(core_options) > 1:
@@ -1380,8 +1425,7 @@ def _calendar_wizard_tab(user, role):
         all_day = all_day.copy()
         all_day["_date"] = pd.to_datetime(all_day["s_date"]).dt.date
 
-
-    # ---- Step 1: Training -- fixed, no choice offered, merged for display
+    # ---- Section 1: Training -- fixed, card view, no choice offered ------
     st.markdown("#### \U0001F3EB Training (fixed)")
     training = pd.DataFrame()
     if not own_cal.empty:
@@ -1398,13 +1442,7 @@ def _calendar_wizard_tab(user, role):
         training = training.copy()
         training["email_id"] = email
         training_display = _merge_consecutive(training)
-        for _, r in training_display.sort_values("slot_time").iterrows():
-            bits = [str(r["slot_time"])]
-            if r.get("c_alias"):
-                bits.append(str(r["c_alias"]))
-            if r.get("batch_code"):
-                bits.append(str(r["batch_code"]))
-            st.markdown(f"- **{bits[0]}**  \u00b7  " + "  \u00b7  ".join(bits[1:]))
+        _render_training_cards(training_display, key_prefix="cal_wizard_train")
 
     # ---- Build the day's full slot grid (system-wide + own CMIS rows) --
     day_grid: set = set()
@@ -1418,10 +1456,52 @@ def _calendar_wizard_tab(user, role):
         st.info("No free time on this day \u2014 fully booked with training.")
         return
 
-    # ---- Step 2: Evaluation -- reuses the SAME card component (and its
+    st.divider()
+
+    # ---- Section 2: Mock Interview -- FIRST, nationwide, in free time ---
+    st.markdown("#### \U0001F3AF Mock Interview")
+    mi_candidates = db.get_all_mock_interview_sessions(picked_day, picked_day)
+    if not mi_candidates.empty:
+        mi_candidates = mi_candidates[mi_candidates["slot_time"].isin(free_slots)].copy()
+        mi_candidates["_date"] = pd.to_datetime(mi_candidates["s_date"]).dt.date
+
+    if mi_candidates.empty:
+        st.caption("No Mock Interview sessions in the free time on this day.")
+    else:
+        mi_display = _merge_consecutive(mi_candidates)
+        mi_key_prefix = "cal_wizard_mi"
+        saved = _render_mi_cards(mi_display, email, mi_key_prefix)
+        if saved:
+            pending = st.session_state.pop(f"{mi_key_prefix}_pending", {})
+            if not pending:
+                st.info("No changes to save \u2014 pick a status on a session first.")
+            else:
+                for _key, (new_status, r) in pending.items():
+                    members = r.get("_members")
+                    if not isinstance(members, (list, tuple)) or not members:
+                        members = [r["slot_time"]]
+                    for m_slot in members:
+                        db.upsert_mock_interview_assignment(
+                            extended_ae_email=email,
+                            session_date=r["_date"],
+                            slot_time=m_slot,
+                            batch_code=r.get("batch_code"),
+                            c_alias=r.get("c_alias"),
+                            trainer_email=r.get("email_id"),
+                            trainer_name=(str(r.get("f_name") or "") + " " + str(r.get("l_name") or "")).strip(),
+                            program_name=r.get("program_name"),
+                            status=new_status,
+                            source="manual",
+                        )
+                db.clear_app_caches()
+                st.success(f"Saved {len(pending)} change{'s' if len(pending) != 1 else ''}.")
+                st.rerun()
+
+    st.divider()
+
+    # ---- Section 3: Evaluation -- reuses the SAME card component (and its
     # built-in Available/Mine/Teammate's status handling + Save) as the
-    # Evaluations tab, so this looks and behaves identically -- just scoped
-    # to this one day's free time instead of a 7-day range.
+    # Evaluations tab -- scoped to this one day's free time.
     st.markdown("#### \U0001F4DD Evaluation")
     eval_candidates = pd.DataFrame()
     if not all_day.empty:
@@ -1437,53 +1517,6 @@ def _calendar_wizard_tab(user, role):
         eval_display = _merge_consecutive(eval_candidates)
         _sessions_table(eval_display, core_ae_email, picked_day, picked_day, role, email, key_prefix="cal_wizard_eval_")
 
-    # ---- Recompute free time AFTER any evaluation already claimed today -
-    already = db.get_selections_for_role(role, email, picked_day, picked_day)
-    eval_claimed_slots = set()
-    if not already.empty:
-        eval_claimed_slots = set(already[already["status"].isin(CLAIMED)]["slot_time"])
-    remaining_free = free_slots - eval_claimed_slots
-
-    if not remaining_free:
-        return  # every free slot is now spoken for -- nothing left to show
-
-    # ---- Step 3: Mock Interview -- only in whatever free time is left --
-    mi_candidates = db.get_all_mock_interview_sessions(picked_day, picked_day)
-    if not mi_candidates.empty:
-        mi_candidates = mi_candidates[mi_candidates["slot_time"].isin(remaining_free)].copy()
-        mi_candidates["_date"] = pd.to_datetime(mi_candidates["s_date"]).dt.date
-    if mi_candidates.empty:
-        return  # no MI session in the remaining free time -- show nothing
-
-    st.markdown("#### \U0001F3AF Mock Interview")
-    mi_display = _merge_consecutive(mi_candidates)
-    key_prefix = "cal_wizard_mi"
-    saved = _render_mi_cards(mi_display, email, key_prefix)
-    if saved:
-        pending = st.session_state.pop(f"{key_prefix}_pending", {})
-        if not pending:
-            st.info("No changes to save \u2014 pick a status on a session first.")
-        else:
-            for _key, (new_status, r) in pending.items():
-                members = r.get("_members")
-                if not isinstance(members, (list, tuple)) or not members:
-                    members = [r["slot_time"]]
-                for m_slot in members:
-                    db.upsert_mock_interview_assignment(
-                        extended_ae_email=email,
-                        session_date=r["_date"],
-                        slot_time=m_slot,
-                        batch_code=r.get("batch_code"),
-                        c_alias=r.get("c_alias"),
-                        trainer_email=r.get("email_id"),
-                        trainer_name=(str(r.get("f_name") or "") + " " + str(r.get("l_name") or "")).strip(),
-                        program_name=r.get("program_name"),
-                        status=new_status,
-                        source="manual",
-                    )
-            db.clear_app_caches()
-            st.success(f"Saved {len(pending)} change{'s' if len(pending) != 1 else ''}.")
-            st.rerun()
 
 
 def _sessions_tab(user, role):
