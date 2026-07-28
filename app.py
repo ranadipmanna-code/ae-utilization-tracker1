@@ -1225,66 +1225,114 @@ def _my_core_tab(user):
 
 
 
-def _day_part(slot_time: str) -> str:
-    """Morning / Afternoon / Evening bucket from a slot's start time."""
-    mins = _slot_start_minutes(slot_time)
-    if mins < 12 * 60:
-        return "\U0001F305 Morning"
-    if mins < 16 * 60:
-        return "\U0001F31E Afternoon"
-    return "\U0001F307 Evening"
 
+def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool:
+    """Mock Interview candidates as the SAME card style as _sessions_table's
+    Evaluation cards (scard / pill-mine / pill-lock / pill-avail / slot-head
+    CSS classes) -- grouped by trainer, one card per (merged) session, a
+    Selected/Not Selected control per card, Save at the bottom.
 
-def _grouped_session_picker(display_df: pd.DataFrame, key_prefix: str):
-    """Render a day-part-grouped, trainer-sorted picker instead of one flat
-    dropdown -- Morning / Afternoon / Evening sections, each a compact table
-    plus a radio scoped to just that section, so it's obvious at a glance
-    which sessions are morning vs afternoon vs evening.
-
-    Returns the picked row (a pandas Series) if exactly one radio across all
-    sections has a real pick, else None (and warns if more than one does).
+    Returns whether Save was pressed; writes are done by the caller so it can
+    fan the write across every 30-min slot a merged card spans.
     """
-    if display_df.empty:
-        return None
+    if df.empty:
+        return False
 
-    d = display_df.copy()
-    d["_trainer"] = (d["f_name"].fillna("") + " " + d["l_name"].fillna("")).str.strip()
-    d["_part"] = d["slot_time"].apply(_day_part)
-    d["_sort"] = d["slot_time"].apply(_slot_start_minutes)
-    d = d.sort_values(["_part", "_trainer", "_sort"])
+    # Ownership across EVERY Extended AE for this day -- same "who holds
+    # this slot" lookup _sessions_table does via get_team_selections, just
+    # against the dedicated MI table instead.
+    existing = db.get_mock_interview_assignments(None, df["_date"].min(), df["_date"].max())
+    status_by_key: dict[str, tuple[str, str]] = {}
+    if not existing.empty:
+        for _, s in existing.iterrows():
+            k = f"{s['session_date']}|{s['slot_time']}|{s['batch_code'] or ''}"
+            status_by_key[k] = (s["status"], s["extended_ae_email"])
 
-    picks: dict[str, pd.Series] = {}
-    for part in ["\U0001F305 Morning", "\U0001F31E Afternoon", "\U0001F307 Evening"]:
-        grp = d[d["_part"] == part]
-        if grp.empty:
-            continue
-        st.markdown(f"**{part}**")
-        st.dataframe(
-            grp[["slot_time", "_trainer", "c_alias", "batch_code"]].rename(columns={
-                "slot_time": "Time", "_trainer": "Trainer",
-                "c_alias": "Module", "batch_code": "Batch",
-            }),
-            hide_index=True, use_container_width=True,
-        )
-        labels = [
-            f"{r['slot_time']}  \u00b7  {r['_trainer']}  \u00b7  "
-            f"{r.get('c_alias','') or ''}  \u00b7  {r.get('batch_code','') or ''}"
-            for _, r in grp.iterrows()
-        ]
-        options = ["\u2014 none \u2014"] + labels
-        choice = st.radio(
-            f"Pick from {part}", options, key=f"{key_prefix}_{part}",
-            label_visibility="collapsed",
-        )
-        if choice != "\u2014 none \u2014":
-            picks[part] = grp.iloc[labels.index(choice)]
+    def _txt(v) -> str:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        s = str(v).strip()
+        return "" if s.lower() in ("nan", "none", "null") else s
 
-    if not picks:
-        return None
-    if len(picks) > 1:
-        st.warning("Pick a session in only ONE time-of-day section, then Save.")
-        return None
-    return next(iter(picks.values()))
+    d = df.copy()
+    d["Trainer"] = (d["f_name"].fillna("") + " " + d["l_name"].fillna("")).str.strip()
+    d["Duration"] = d.apply(_fmt_duration, axis=1)
+
+    pending: dict = {}
+    with st.form(f"{key_prefix}_form"):
+        for trainer, grp in d.groupby("Trainer", sort=False):
+            first = grp.iloc[0]
+            st.markdown(
+                f"<div class='slot-head'>\U0001F464 {trainer or _txt(first.get('email_id')) or 'Unknown trainer'}"
+                f" &nbsp;\u00b7&nbsp; <span class='slot-count'>{len(grp)} session"
+                f"{'s' if len(grp) != 1 else ''}</span></div>",
+                unsafe_allow_html=True,
+            )
+            for _, r in grp.iterrows():
+                members = r.get("_members")
+                if not isinstance(members, (list, tuple)) or not members:
+                    members = [r["slot_time"]]
+                b = r.get("batch_code") or ""
+                # Same "a claimed member wins" rule as _sessions_table: if
+                # any underlying 30-min slot is already held, treat the
+                # whole merged card as held.
+                status, owner = "Not Selected", None
+                for m_slot in members:
+                    k = f"{r['_date']}|{m_slot}|{b}"
+                    stt, own = status_by_key.get(k, ("Not Selected", None))
+                    if stt in CLAIMED:
+                        status, owner = stt, own
+                        break
+
+                claimed_row = status in CLAIMED
+                editable = (not owner) or (owner.lower() == user_email.lower())
+                if owner and claimed_row:
+                    who = ("<span class='pill pill-mine'>\u2605 Mine</span>"
+                           if owner.lower() == user_email.lower()
+                           else f"<span class='pill pill-lock'>\U0001F512 {owner.split('@')[0]}</span>")
+                elif not claimed_row:
+                    who = "<span class='pill pill-avail'>\u25f7 Available</span>"
+                else:
+                    who = ""
+
+                day_lbl = pd.to_datetime(r["_date"]).strftime("%a, %d %b")
+                sub_bits = [r["Duration"], f"<b>{_txt(r.get('batch_code'))}</b>"]
+                for extra in (_txt(r.get("c_alias")), _txt(r.get("program_name"))):
+                    if extra:
+                        sub_bits.append(extra)
+                sub_line = " \u00b7 ".join(b for b in sub_bits if b and b != "<b></b>")
+
+                cA, cB = st.columns([4, 1.3])
+                with cA:
+                    st.markdown(
+                        f"""<div class="scard {'scard-mine' if (owner and owner.lower()==user_email.lower()) else ('scard-lock' if claimed_row else 'scard-avail')} scard-mi">
+                          <div class="scard-top">\U0001F551 {day_lbl} &nbsp;\u00b7&nbsp; {_txt(r.get('slot_time'))} {who}</div>
+                          <div class="scard-sub">{sub_line}</div>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+                with cB:
+                    if editable:
+                        options = ["Not Selected", "Selected"]
+                        default_idx = 1 if claimed_row else 0
+                        key = f"{r['_date']}|{r['slot_time']}|{b}"
+                        sel = st.selectbox(
+                            "status", options, index=default_idx,
+                            key=f"{key_prefix}_st_{key}", label_visibility="collapsed",
+                        )
+                        if sel != options[default_idx]:
+                            pending[key] = (sel, r)
+                    else:
+                        st.markdown(
+                            f"<div class='locked-status'>{status}</div>",
+                            unsafe_allow_html=True,
+                        )
+
+        saved = st.form_submit_button("\U0001F4BE Save changes", type="primary", use_container_width=True)
+
+    if saved and pending:
+        st.session_state[f"{key_prefix}_pending"] = pending
+    return saved and bool(pending)
 
 
 def _calendar_wizard_tab(user, role):
@@ -1363,7 +1411,10 @@ def _calendar_wizard_tab(user, role):
         st.info("No free time on this day \u2014 fully booked with training.")
         return
 
-    # ---- Step 2: Evaluation -- pick ONE (merged) session in free time ----
+    # ---- Step 2: Evaluation -- reuses the SAME card component (and its
+    # built-in Available/Mine/Teammate's status handling + Save) as the
+    # Evaluations tab, so this looks and behaves identically -- just scoped
+    # to this one day's free time instead of a 7-day range.
     st.markdown("#### \U0001F4DD Evaluation")
     eval_candidates = pd.DataFrame()
     if not all_day.empty:
@@ -1377,41 +1428,7 @@ def _calendar_wizard_tab(user, role):
         st.caption("No sessions from your aligned faculty are available to evaluate in the free time on this day.")
     else:
         eval_display = _merge_consecutive(eval_candidates)
-        row = _grouped_session_picker(eval_display, key_prefix="cal_wizard_eval")
-        if row is not None:
-            if st.button("\U0001F4BE Save evaluation pick", key="cal_wizard_eval_save"):
-                # A merged class fans the write out across EVERY 30-min slot
-                # it spans -- identical to how the Evaluations tab saves a
-                # merged pick -- so the DB stays correct even though the
-                # wizard showed one combined row.
-                members = row.get("_members")
-                if not isinstance(members, (list, tuple)) or not members:
-                    members = [row["slot_time"]]
-                core_ae_email = (
-                    db.core_ae_for_extended(email) if role == "extended_ae" else email
-                ) or email
-                sel_id = None
-                for m_slot in members:
-                    sel_id = db.upsert_selection_for_role(
-                        role, email, row["_date"], m_slot,
-                        row.get("m_code"), row.get("batch_code"), "Selected",
-                    )
-                    try:
-                        db.set_highlight_flag(
-                            row["_date"], m_slot, row.get("batch_code"),
-                            core_ae_email, email, True,
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        db.sync_slot_task_from_evaluation(
-                            email, role, row["_date"], m_slot, True, sel_id,
-                        )
-                    except Exception:
-                        pass
-                db.clear_app_caches()
-                st.success("Saved. Refreshing remaining free time\u2026")
-                st.rerun()
+        _sessions_table(eval_display, core_ae_email, picked_day, picked_day, role, email)
 
     # ---- Recompute free time AFTER any evaluation already claimed today -
     already = db.get_selections_for_role(role, email, picked_day, picked_day)
@@ -1433,27 +1450,32 @@ def _calendar_wizard_tab(user, role):
 
     st.markdown("#### \U0001F3AF Mock Interview")
     mi_display = _merge_consecutive(mi_candidates)
-    mrow = _grouped_session_picker(mi_display, key_prefix="cal_wizard_mi")
-    if mrow is not None:
-        if st.button("\U0001F4BE Save Mock Interview pick", key="cal_wizard_mi_save"):
-            members = mrow.get("_members")
-            if not isinstance(members, (list, tuple)) or not members:
-                members = [mrow["slot_time"]]
-            for m_slot in members:
-                db.upsert_mock_interview_assignment(
-                    extended_ae_email=email,
-                    session_date=mrow["_date"],
-                    slot_time=m_slot,
-                    batch_code=mrow.get("batch_code"),
-                    c_alias=mrow.get("c_alias"),
-                    trainer_email=mrow.get("email_id"),
-                    trainer_name=(str(mrow.get("f_name") or "") + " " + str(mrow.get("l_name") or "")).strip(),
-                    program_name=mrow.get("program_name"),
-                    status="Selected",
-                    source="manual",
-                )
+    key_prefix = "cal_wizard_mi"
+    saved = _render_mi_cards(mi_display, email, key_prefix)
+    if saved:
+        pending = st.session_state.pop(f"{key_prefix}_pending", {})
+        if not pending:
+            st.info("No changes to save \u2014 pick a status on a session first.")
+        else:
+            for _key, (new_status, r) in pending.items():
+                members = r.get("_members")
+                if not isinstance(members, (list, tuple)) or not members:
+                    members = [r["slot_time"]]
+                for m_slot in members:
+                    db.upsert_mock_interview_assignment(
+                        extended_ae_email=email,
+                        session_date=r["_date"],
+                        slot_time=m_slot,
+                        batch_code=r.get("batch_code"),
+                        c_alias=r.get("c_alias"),
+                        trainer_email=r.get("email_id"),
+                        trainer_name=(str(r.get("f_name") or "") + " " + str(r.get("l_name") or "")).strip(),
+                        program_name=r.get("program_name"),
+                        status=new_status,
+                        source="manual",
+                    )
             db.clear_app_caches()
-            st.success("Saved.")
+            st.success(f"Saved {len(pending)} change{'s' if len(pending) != 1 else ''}.")
             st.rerun()
 
 
