@@ -1114,10 +1114,12 @@ def upsert_mock_interview_assignment(
 ) -> None:
     """Write one row to the dedicated mock_interview_assignment table.
 
-    Uses INSERT ... ON DUPLICATE KEY UPDATE against the table's UNIQUE KEY
-    (extended_ae_email, session_date, slot_time, batch_code) -- so re-running
-    the auto-assignment, or a person toggling their own status, is always an
-    upsert, never a duplicate row.
+    Upserts via an explicit NULL-safe SELECT (using <=> for batch_code) then
+    UPDATE-or-INSERT on that exact row id -- not "INSERT ... ON DUPLICATE KEY
+    UPDATE" against the (extended_ae_email, session_date, slot_time,
+    batch_code) unique key, because MySQL's unique-index duplicate detection
+    treats two NULLs as not-equal, which could silently create a second row
+    instead of updating the first whenever batch_code is NULL.
 
     EXCLUSIVITY: one interview can only ever be held by one Extended AE.
     When this writes a LIVE status (anything other than "Not Selected"), it
@@ -1149,32 +1151,68 @@ def upsert_mock_interview_assignment(
                 {"d": session_date, "st": slot_time, "bc": batch_code,
                  "ae": extended_ae_email},
             )
-        conn.execute(
+
+        # NULL-SAFE upsert -- deliberately NOT "INSERT ... ON DUPLICATE KEY
+        # UPDATE" against the (extended_ae_email, session_date, slot_time,
+        # batch_code) unique key. MySQL's unique-index duplicate detection
+        # treats two NULLs as NOT equal, so if batch_code is ever NULL for a
+        # row, that INSERT would silently create a SECOND row instead of
+        # updating the first -- the same person's own toggle from Selected
+        # to Not Selected (or back) would leave a stale "Selected" row
+        # sitting underneath, which is exactly what made the Mock Interview
+        # pool table keep showing "Taken by X" after saving "Not Selected".
+        # SELECT with the <=> null-safe operator first, like upsert_selection
+        # and set_highlight_flag already do, then UPDATE that exact row or
+        # INSERT fresh -- never relies on MySQL's NULL-in-unique-key quirk.
+        existing = conn.execute(
             text(
                 f"""
-                INSERT INTO {MOCK_INTERVIEW_TABLE}
-                    (extended_ae_email, session_date, slot_time, batch_code,
-                     c_alias, trainer_email, trainer_name, program_name,
-                     status, source)
-                VALUES
-                    (:ae, :d, :st, :bc, :ca, :te, :tn, :pn, :status, :source)
-                ON DUPLICATE KEY UPDATE
-                    c_alias = VALUES(c_alias),
-                    trainer_email = VALUES(trainer_email),
-                    trainer_name = VALUES(trainer_name),
-                    program_name = VALUES(program_name),
-                    status = VALUES(status),
-                    source = VALUES(source),
-                    updated_on = NOW()
+                SELECT id FROM {MOCK_INTERVIEW_TABLE}
+                WHERE LOWER(extended_ae_email) = LOWER(:ae)
+                  AND session_date = :d AND slot_time = :st
+                  AND (batch_code <=> :bc)
+                LIMIT 1
                 """
             ),
-            {
-                "ae": extended_ae_email, "d": session_date, "st": slot_time,
-                "bc": batch_code, "ca": c_alias, "te": trainer_email,
-                "tn": trainer_name, "pn": program_name, "status": status,
-                "source": source,
-            },
-        )
+            {"ae": extended_ae_email, "d": session_date, "st": slot_time, "bc": batch_code},
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                text(
+                    f"""
+                    UPDATE {MOCK_INTERVIEW_TABLE}
+                    SET c_alias = :ca, trainer_email = :te, trainer_name = :tn,
+                        program_name = :pn, status = :status, source = :source,
+                        updated_on = NOW()
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "ca": c_alias, "te": trainer_email, "tn": trainer_name,
+                    "pn": program_name, "status": status, "source": source,
+                    "id": existing[0],
+                },
+            )
+        else:
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {MOCK_INTERVIEW_TABLE}
+                        (extended_ae_email, session_date, slot_time, batch_code,
+                         c_alias, trainer_email, trainer_name, program_name,
+                         status, source)
+                    VALUES
+                        (:ae, :d, :st, :bc, :ca, :te, :tn, :pn, :status, :source)
+                    """
+                ),
+                {
+                    "ae": extended_ae_email, "d": session_date, "st": slot_time,
+                    "bc": batch_code, "ca": c_alias, "te": trainer_email,
+                    "tn": trainer_name, "pn": program_name, "status": status,
+                    "source": source,
+                },
+            )
 
 
 @st.cache_data(ttl=45, show_spinner=False)
