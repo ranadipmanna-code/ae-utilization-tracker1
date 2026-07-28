@@ -51,7 +51,60 @@ def app_engine() -> Engine:
 # ---------------------------------------------------------------------------
 # CMIS reads (faculty sessions)
 # ---------------------------------------------------------------------------
+# CMIS_VIEW is the LIVE remote view. As of the mirror change, the portal no
+# longer reads session data from it directly on the hot path — that all goes
+# through the local mirror (see below). CMIS_VIEW is now used only by the admin
+# email-reconciliation report (get_cmis_directory), which genuinely needs the
+# full CMIS roster across all dates.
 CMIS_VIEW = "upcoming_trainer_utilization_view"
+
+# ---------------------------------------------------------------------------
+# Local CMIS mirror  (fast path)
+# ---------------------------------------------------------------------------
+# `cmis_session_mirror` is a table inside Anudip_AE_Team (the appdb) holding a
+# rolling 30-day copy of the CMIS view, refreshed nightly by sync_cmis_mirror.py.
+# Every session-display / MI-pool / date-picker read below points here instead
+# of the remote CMIS host — a local table with (email_id, s_date) indexes,
+# no cross-host round-trip.
+#
+# The mirror physically holds 30 days, but the PORTAL only ever exposes the
+# next VISIBLE_WINDOW_DAYS (today .. today+9). Any requested date range is
+# clamped to that window via _clamp_to_window(), so a trainer entering a past
+# date — or a date beyond the visible horizon — simply sees nothing.
+MIRROR_TABLE = "cmis_session_mirror"
+VISIBLE_WINDOW_DAYS = 10  # portal shows today .. today + (VISIBLE_WINDOW_DAYS - 1)
+
+
+@st.cache_resource
+def mirror_engine() -> Engine:
+    """The mirror lives in the appdb, so it shares that engine/pool."""
+    return app_engine()
+
+
+def visible_window(today: date | None = None) -> tuple[date, date]:
+    """(lo, hi) inclusive for what the portal is allowed to show right now."""
+    d = today or date.today()
+    return d, d + timedelta(days=VISIBLE_WINDOW_DAYS - 1)
+
+
+def _clamp_to_window(
+    lo: date | None, hi: date | None, today: date | None = None
+) -> tuple[date, date] | None:
+    """Intersect a requested [lo, hi] with the visible window.
+
+    Returns the clamped (lo, hi), or None if the request falls entirely
+    outside the window (in which case the caller returns an empty frame —
+    no DB round-trip needed). A None input bound means "unbounded on that
+    side" and defaults to the window edge.
+    """
+    w_lo, w_hi = visible_window(today)
+    req_lo = lo or w_lo
+    req_hi = hi or w_hi
+    c_lo = max(req_lo, w_lo)
+    c_hi = min(req_hi, w_hi)
+    if c_lo > c_hi:
+        return None
+    return c_lo, c_hi
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -59,6 +112,10 @@ def fetch_sessions_for_faculty(faculty_emails: tuple[str, ...], week_start: date
     """All CMIS sessions for the given faculty emails within [week_start, week_end]."""
     if not faculty_emails:
         return pd.DataFrame()
+    win = _clamp_to_window(week_start, week_end)
+    if win is None:
+        return pd.DataFrame()
+    week_start, week_end = win
     placeholders = ", ".join(f":e{i}" for i in range(len(faculty_emails)))
     params: dict[str, Any] = {f"e{i}": e for i, e in enumerate(faculty_emails)}
     params["ws"] = week_start
@@ -68,13 +125,13 @@ def fetch_sessions_for_faculty(faculty_emails: tuple[str, ...], week_start: date
         SELECT s_date, m_code, f_name, l_name, time_duration, day_name,
                c_alias, slot_name, slot_time, batch_code, email_id,
                class_link, program_name
-        FROM {CMIS_VIEW}
+        FROM {MIRROR_TABLE}
         WHERE email_id IN ({placeholders})
           AND s_date BETWEEN :ws AND :we
         ORDER BY s_date, slot_time
         """
     )
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         return pd.read_sql(sql, conn, params=params)
 
 
@@ -86,23 +143,29 @@ def fetch_sessions_all_for_faculty(faculty_emails: tuple[str, ...], from_date: d
     """
     if not faculty_emails:
         return pd.DataFrame()
+    # "EVERY session" now means "everything the portal may show" = the visible
+    # window. The mirror holds no data outside it, so the old open-ended query
+    # is naturally bounded; we clamp explicitly for clarity and to honour a
+    # caller-supplied from_date.
+    win = _clamp_to_window(from_date, None)
+    if win is None:
+        return pd.DataFrame()
+    w_lo, w_hi = win
     placeholders = ", ".join(f":e{i}" for i in range(len(faculty_emails)))
     params: dict[str, Any] = {f"e{i}": e for i, e in enumerate(faculty_emails)}
-    where_date = ""
-    if from_date is not None:
-        where_date = " AND s_date >= :fd"
-        params["fd"] = from_date
+    params["a"] = w_lo
+    params["b"] = w_hi
     sql = text(
         f"""
         SELECT s_date, m_code, f_name, l_name, time_duration, day_name,
                c_alias, slot_name, slot_time, batch_code, email_id,
                class_link, program_name
-        FROM {CMIS_VIEW}
-        WHERE email_id IN ({placeholders}){where_date}
+        FROM {MIRROR_TABLE}
+        WHERE email_id IN ({placeholders}) AND s_date BETWEEN :a AND :b
         ORDER BY s_date, slot_time
         """
     )
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         return pd.read_sql(sql, conn, params=params)
 
 
@@ -120,6 +183,10 @@ def get_members_own_slots(
     """
     if not member_emails:
         return pd.DataFrame()
+    win = _clamp_to_window(from_date, to_date)
+    if win is None:
+        return pd.DataFrame()
+    from_date, to_date = win
     placeholders = ", ".join(f":e{i}" for i in range(len(member_emails)))
     params: dict[str, Any] = {f"e{i}": e for i, e in enumerate(member_emails)}
     params["a"] = from_date
@@ -128,12 +195,12 @@ def get_members_own_slots(
         f"""
         SELECT email_id, s_date, slot_name, slot_time, day_name, batch_code,
                m_code, c_alias, program_name
-        FROM {CMIS_VIEW}
+        FROM {MIRROR_TABLE}
         WHERE email_id IN ({placeholders}) AND s_date BETWEEN :a AND :b
         ORDER BY email_id, s_date, slot_time
         """
     )
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         return pd.read_sql(sql, conn, params=params)
 
 
@@ -146,13 +213,17 @@ def faculty_date_bounds(faculty_emails: tuple[str, ...]) -> tuple[date | None, d
     """
     if not faculty_emails:
         return None, None, 0
+    w_lo, w_hi = visible_window()
     placeholders = ", ".join(f":e{i}" for i in range(len(faculty_emails)))
     params: dict[str, Any] = {f"e{i}": e for i, e in enumerate(faculty_emails)}
+    params["a"] = w_lo
+    params["b"] = w_hi
     sql = text(
         f"SELECT MIN(s_date) AS lo, MAX(s_date) AS hi, COUNT(*) AS n "
-        f"FROM {CMIS_VIEW} WHERE email_id IN ({placeholders})"
+        f"FROM {MIRROR_TABLE} WHERE email_id IN ({placeholders}) "
+        f"AND s_date BETWEEN :a AND :b"
     )
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         df = pd.read_sql(sql, conn, params=params)
     if df.empty:
         return None, None, 0
@@ -175,6 +246,10 @@ def fetch_sessions_range_for_faculty(
     """
     if not faculty_emails:
         return pd.DataFrame()
+    win = _clamp_to_window(from_date, to_date)
+    if win is None:
+        return pd.DataFrame()
+    from_date, to_date = win
     placeholders = ", ".join(f":e{i}" for i in range(len(faculty_emails)))
     params: dict[str, Any] = {f"e{i}": e for i, e in enumerate(faculty_emails)}
     params["a"] = from_date
@@ -184,26 +259,25 @@ def fetch_sessions_range_for_faculty(
         SELECT s_date, m_code, f_name, l_name, time_duration, day_name,
                c_alias, slot_name, slot_time, batch_code, email_id,
                class_link, program_name
-        FROM {CMIS_VIEW}
+        FROM {MIRROR_TABLE}
         WHERE email_id IN ({placeholders}) AND s_date BETWEEN :a AND :b
         ORDER BY s_date, slot_time
         """
     )
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         return pd.read_sql(sql, conn, params=params)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def cmis_date_bounds() -> tuple[date | None, date | None]:
-    """Min/max session date available in the CMIS view."""
-    sql = text(f"SELECT MIN(s_date) AS lo, MAX(s_date) AS hi FROM {CMIS_VIEW}")
-    with cmis_engine().connect() as conn:
-        df = pd.read_sql(sql, conn)
-    if df.empty:
-        return None, None
-    lo, hi = df.iloc[0]["lo"], df.iloc[0]["hi"]
-    return (pd.to_datetime(lo).date() if lo is not None else None,
-            pd.to_datetime(hi).date() if hi is not None else None)
+    """Selectable date range for the portal = the visible window.
+
+    This used to return CMIS's global min/max (out to 2027) so future dates
+    stayed pickable. With the mirror, the portal only exposes the next
+    VISIBLE_WINDOW_DAYS, so the pickers should offer exactly that — otherwise
+    a trainer could pick a date the mirror has no data for and see nothing.
+    """
+    return visible_window()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -224,21 +298,24 @@ def sessions_tab_bounds(
     identical values to calling faculty_date_bounds(...) then
     cmis_date_bounds() separately.
     """
+    # Global bounds are simply the visible window now (see cmis_date_bounds).
+    g_lo, g_hi = visible_window()
+
     if not faculty_emails:
-        g_lo, g_hi = cmis_date_bounds()
         return None, None, 0, g_lo, g_hi
 
     placeholders = ", ".join(f":e{i}" for i in range(len(faculty_emails)))
     params: dict[str, Any] = {f"e{i}": e for i, e in enumerate(faculty_emails)}
+    params["a"] = g_lo
+    params["b"] = g_hi
     faculty_sql = text(
         f"SELECT MIN(s_date) AS lo, MAX(s_date) AS hi, COUNT(*) AS n "
-        f"FROM {CMIS_VIEW} WHERE email_id IN ({placeholders})"
+        f"FROM {MIRROR_TABLE} WHERE email_id IN ({placeholders}) "
+        f"AND s_date BETWEEN :a AND :b"
     )
-    global_sql = text(f"SELECT MIN(s_date) AS lo, MAX(s_date) AS hi FROM {CMIS_VIEW}")
 
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         fdf = pd.read_sql(faculty_sql, conn, params=params)
-        gdf = pd.read_sql(global_sql, conn)
 
     if fdf.empty:
         f_lo, f_hi, f_n = None, None, 0
@@ -248,30 +325,27 @@ def sessions_tab_bounds(
         f_hi = pd.to_datetime(hi).date() if hi is not None else None
         f_n = n
 
-    if gdf.empty:
-        g_lo, g_hi = None, None
-    else:
-        lo, hi = gdf.iloc[0]["lo"], gdf.iloc[0]["hi"]
-        g_lo = pd.to_datetime(lo).date() if lo is not None else None
-        g_hi = pd.to_datetime(hi).date() if hi is not None else None
-
     return f_lo, f_hi, f_n, g_lo, g_hi
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_sessions_all(week_start: date, week_end: date, limit: int = 5000) -> pd.DataFrame:
     """All CMIS sessions in the window (admin overview)."""
+    win = _clamp_to_window(week_start, week_end)
+    if win is None:
+        return pd.DataFrame()
+    week_start, week_end = win
     sql = text(
         f"""
         SELECT s_date, m_code, f_name, l_name, day_name, c_alias,
                slot_time, batch_code, email_id, program_name
-        FROM {CMIS_VIEW}
+        FROM {MIRROR_TABLE}
         WHERE s_date BETWEEN :ws AND :we
         ORDER BY s_date, slot_time
         LIMIT :lim
         """
     )
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         return pd.read_sql(sql, conn, params={"ws": week_start, "we": week_end, "lim": limit})
 
 
@@ -386,6 +460,12 @@ def list_core_ae_emails() -> list[str]:
 
 
 def get_selections(extended_ae_email: str | None, week_start: date, week_end: date) -> pd.DataFrame:
+    """PORTAL VIEW ONLY — clamped to the visible window, same as CMIS sessions.
+    Underlying rows for every date remain stored; this only limits display."""
+    win = _clamp_to_window(week_start, week_end)
+    if win is None:
+        return pd.DataFrame()
+    week_start, week_end = win
     where = "session_date BETWEEN :ws AND :we"
     params: dict[str, Any] = {"ws": week_start, "we": week_end}
     if extended_ae_email:
@@ -552,9 +632,13 @@ def make_session_id(trainer_email: str, session_date, slot_time: str, batch_code
 
 
 def get_evaluations(evaluator_email: str | None = None) -> pd.DataFrame:
-    where, params = "1=1", {}
+    """PORTAL VIEW ONLY — clamped to the visible window (today..today+9), same
+    as CMIS sessions and MI assignments. Rows for every session_date remain
+    stored in `session_evaluation`; this only limits what the app displays."""
+    w_lo, w_hi = visible_window()
+    where, params = "session_date BETWEEN :w_lo AND :w_hi", {"w_lo": w_lo, "w_hi": w_hi}
     if evaluator_email:
-        where = "evaluator_email = :e"
+        where += " AND evaluator_email = :e"
         params["e"] = evaluator_email
     sql = text(
         f"""
@@ -763,6 +847,12 @@ def _eval_table(role: str) -> tuple[str, str]:
 
 
 def get_selections_for_role(role: str, email: str | None, from_date: date, to_date: date) -> pd.DataFrame:
+    """PORTAL VIEW ONLY — clamped to the visible window, same as CMIS sessions.
+    Underlying rows for every date remain stored; this only limits display."""
+    win = _clamp_to_window(from_date, to_date)
+    if win is None:
+        return pd.DataFrame()
+    from_date, to_date = win
     tbl, col = _sel_table(role)
     where = "session_date BETWEEN :a AND :b"
     params: dict[str, Any] = {"a": from_date, "b": to_date}
@@ -844,10 +934,13 @@ def upsert_selection_for_role(
 
 
 def get_evaluations_for_role(role: str, email: str | None = None) -> pd.DataFrame:
+    """PORTAL VIEW ONLY — clamped to the visible window, same as get_evaluations.
+    Underlying rows for every session_date remain stored."""
     tbl, col = _eval_table(role)
-    where, params = "1=1", {}
+    w_lo, w_hi = visible_window()
+    where, params = "session_date BETWEEN :w_lo AND :w_hi", {"w_lo": w_lo, "w_hi": w_hi}
     if email:
-        where = f"{col} = :e"
+        where += f" AND {col} = :e"
         params["e"] = email
     sql = text(
         f"SELECT id, {col} AS evaluator_email, session_id, trainer_name, trainer_email, "
@@ -1199,18 +1292,22 @@ def get_all_mock_interview_sessions(from_date: date, to_date: date) -> pd.DataFr
     """Every CMIS row in the range whose c_alias is a Mock Interview alias,
     from ANY trainer system-wide — the candidate pool auto-assignment draws
     from. Read-only, same as every other CMIS query."""
+    win = _clamp_to_window(from_date, to_date)
+    if win is None:
+        return pd.DataFrame()
+    from_date, to_date = win
     alias_list = "','".join(a.lower() for a in MOCK_INTERVIEW_ALIASES)
     sql = text(
         f"""
         SELECT s_date, c_alias, slot_time, batch_code, email_id, f_name,
                l_name, program_name, m_code
-        FROM {CMIS_VIEW}
+        FROM {MIRROR_TABLE}
         WHERE LOWER(c_alias) IN ('{alias_list}')
           AND s_date BETWEEN :a AND :b
         ORDER BY s_date, slot_time
         """
     )
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         return pd.read_sql(sql, conn, params={"a": from_date, "b": to_date})
 
 
@@ -1319,7 +1416,19 @@ def get_mock_interview_assignments(
 ) -> pd.DataFrame:
     """Rows from the dedicated table for the range. Pass extended_ae_email
     to scope to one person, or None for everyone (used by the allocator to
-    see what's already assigned system-wide)."""
+    see what's already assigned system-wide).
+
+    PORTAL VIEW ONLY — clamped to the visible window (today..today+9), same
+    as CMIS sessions. The underlying rows for every date are never deleted;
+    this only limits what the app displays/returns."""
+    win = _clamp_to_window(from_date, to_date)
+    if win is None:
+        return pd.DataFrame(columns=[
+            "id", "extended_ae_email", "session_date", "slot_time", "batch_code",
+            "c_alias", "trainer_email", "trainer_name", "program_name", "status",
+            "source", "assigned_on", "updated_on",
+        ])
+    from_date, to_date = win
     where = "session_date BETWEEN :a AND :b"
     params: dict[str, Any] = {"a": from_date, "b": to_date}
     if extended_ae_email:
@@ -1821,17 +1930,21 @@ def get_member_own_slots(member_email: str, from_date: date, to_date: date) -> p
     the slot grid the Mock Interview default applies to."""
     if not member_email:
         return pd.DataFrame()
+    win = _clamp_to_window(from_date, to_date)
+    if win is None:
+        return pd.DataFrame()
+    from_date, to_date = win
     sql = text(
         f"""
         SELECT s_date, slot_name, slot_time, day_name, batch_code, m_code,
                c_alias, program_name,
                TRIM(CONCAT(COALESCE(f_name,''), ' ', COALESCE(l_name,''))) AS trainer_name
-        FROM {CMIS_VIEW}
+        FROM {MIRROR_TABLE}
         WHERE email_id = :e AND s_date BETWEEN :a AND :b
         ORDER BY s_date, slot_time
         """
     )
-    with cmis_engine().connect() as conn:
+    with mirror_engine().connect() as conn:
         return pd.read_sql(sql, conn, params={"e": member_email, "a": from_date, "b": to_date})
 
 
