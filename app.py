@@ -1232,8 +1232,10 @@ def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool
     CSS classes) -- grouped by trainer, one card per (merged) session, a
     Selected/Not Selected control per card, Save at the bottom.
 
-    Returns whether Save was pressed; writes are done by the caller so it can
-    fan the write across every 30-min slot a merged card spans.
+    Returns whether Save was pressed; the caller writes ONE row per merged
+    card (keyed by the whole span, matching mock_interview_assignment's
+    storage convention) -- not fanned across 30-min fragments, unlike the
+    Evaluation save path.
     """
     if df.empty:
         return False
@@ -1269,20 +1271,15 @@ def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool
                 unsafe_allow_html=True,
             )
             for _, r in grp.iterrows():
-                members = r.get("_members")
-                if not isinstance(members, (list, tuple)) or not members:
-                    members = [r["slot_time"]]
                 b = r.get("batch_code") or ""
-                # Same "a claimed member wins" rule as _sessions_table: if
-                # any underlying 30-min slot is already held, treat the
-                # whole merged card as held.
-                status, owner = "Not Selected", None
-                for m_slot in members:
-                    k = f"{r['_date']}|{m_slot}|{b}"
-                    stt, own = status_by_key.get(k, ("Not Selected", None))
-                    if stt in CLAIMED:
-                        status, owner = stt, own
-                        break
+                # KEY BY THE WHOLE MERGED SPAN, not per 30-min fragment --
+                # mock_interview_assignment stores one row per whole block
+                # (matching merge_mi_blocks' mi_key, which the Mock
+                # Interview pool table also keys on), so a 2-hour interview
+                # is ONE row with slot_time="10:00 AM - 12:00 PM", not four
+                # rows for each 30-min fragment.
+                k = f"{r['_date']}|{r['slot_time']}|{b}"
+                status, owner = status_by_key.get(k, ("Not Selected", None))
 
                 claimed_row = status in CLAIMED
                 editable = (not owner) or (owner.lower() == user_email.lower())
@@ -1603,22 +1600,24 @@ def _calendar_wizard_tab(user, role):
                 st.info("No changes to save \u2014 pick a status on a session first.")
             else:
                 for _key, (new_status, r) in pending.items():
-                    members = r.get("_members")
-                    if not isinstance(members, (list, tuple)) or not members:
-                        members = [r["slot_time"]]
-                    for m_slot in members:
-                        db.upsert_mock_interview_assignment(
-                            extended_ae_email=email,
-                            session_date=r["_date"],
-                            slot_time=m_slot,
-                            batch_code=r.get("batch_code"),
-                            c_alias=r.get("c_alias"),
-                            trainer_email=r.get("email_id"),
-                            trainer_name=(str(r.get("f_name") or "") + " " + str(r.get("l_name") or "")).strip(),
-                            program_name=r.get("program_name"),
-                            status=new_status,
-                            source="manual",
-                        )
+                    # ONE row per merged block, keyed by the whole span --
+                    # matching merge_mi_blocks' mi_key format exactly, so
+                    # the Mock Interview pool table's lookup finds it and
+                    # shows "Taken by <name>" / "Not Selected" correctly.
+                    # (Evaluation fans across 30-min fragments because that
+                    # table is keyed per-fragment; this one is not.)
+                    db.upsert_mock_interview_assignment(
+                        extended_ae_email=email,
+                        session_date=r["_date"],
+                        slot_time=r["slot_time"],
+                        batch_code=r.get("batch_code"),
+                        c_alias=r.get("c_alias"),
+                        trainer_email=r.get("email_id"),
+                        trainer_name=(str(r.get("f_name") or "") + " " + str(r.get("l_name") or "")).strip(),
+                        program_name=r.get("program_name"),
+                        status=new_status,
+                        source="manual",
+                    )
                 db.clear_app_caches()
                 st.success(f"Saved {len(pending)} change{'s' if len(pending) != 1 else ''}.")
                 st.rerun()
