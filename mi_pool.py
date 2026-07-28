@@ -268,6 +268,7 @@ def release_pool_claim(mi_key: str, claim_role: str) -> None:
 # ---------------------------------------------------------------------------
 # The ladder itself
 # ---------------------------------------------------------------------------
+@st.cache_data(ttl=60, show_spinner=False)
 def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
     """One row per Mock Interview block, with its position on the ladder.
 
@@ -299,6 +300,7 @@ def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
                 ext_by_key[k] = {
                     "ae": r["extended_ae_email"], "status": str(r["status"]),
                     "source": str(r.get("source") or ""),
+                    "remarks": r.get("remarks"),
                 }
 
     # Stages 2 and 3.
@@ -357,7 +359,7 @@ def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
             "core_status": core_status,
             "faculty": f.get("by", ""),
             "faculty_status": fac_status,
-            "remarks": c.get("remarks") or f.get("remarks") or "",
+            "remarks": c.get("remarks") or f.get("remarks") or e.get("remarks") or "",
             "stage": stage,
             "state": state,
             "holder": holder,
@@ -368,7 +370,7 @@ def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
 
 def clear_pool_caches() -> None:
     """Invalidate only what a pool write can possibly have changed."""
-    for fn in (get_pool_claims, get_mi_blocks):
+    for fn in (get_pool_claims, get_mi_blocks, build_pool):
         try:
             fn.clear()
         except Exception:
