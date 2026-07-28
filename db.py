@@ -1111,6 +1111,7 @@ def upsert_mock_interview_assignment(
     program_name: str | None = None,
     status: str = "Selected",
     source: str = "auto",
+    remarks: str | None = None,
 ) -> None:
     """Write one row to the dedicated mock_interview_assignment table.
 
@@ -1184,14 +1185,14 @@ def upsert_mock_interview_assignment(
                     UPDATE {MOCK_INTERVIEW_TABLE}
                     SET c_alias = :ca, trainer_email = :te, trainer_name = :tn,
                         program_name = :pn, status = :status, source = :source,
-                        updated_on = NOW()
+                        remarks = :remarks, updated_on = NOW()
                     WHERE id = :id
                     """
                 ),
                 {
                     "ca": c_alias, "te": trainer_email, "tn": trainer_name,
                     "pn": program_name, "status": status, "source": source,
-                    "id": existing[0],
+                    "remarks": remarks, "id": existing[0],
                 },
             )
         else:
@@ -1201,16 +1202,16 @@ def upsert_mock_interview_assignment(
                     INSERT INTO {MOCK_INTERVIEW_TABLE}
                         (extended_ae_email, session_date, slot_time, batch_code,
                          c_alias, trainer_email, trainer_name, program_name,
-                         status, source)
+                         status, source, remarks)
                     VALUES
-                        (:ae, :d, :st, :bc, :ca, :te, :tn, :pn, :status, :source)
+                        (:ae, :d, :st, :bc, :ca, :te, :tn, :pn, :status, :source, :remarks)
                     """
                 ),
                 {
                     "ae": extended_ae_email, "d": session_date, "st": slot_time,
                     "bc": batch_code, "ca": c_alias, "te": trainer_email,
                     "tn": trainer_name, "pn": program_name, "status": status,
-                    "source": source,
+                    "source": source, "remarks": remarks,
                 },
             )
 
@@ -1231,7 +1232,7 @@ def get_mock_interview_assignments(
         return pd.DataFrame(columns=[
             "id", "extended_ae_email", "session_date", "slot_time", "batch_code",
             "c_alias", "trainer_email", "trainer_name", "program_name", "status",
-            "source", "assigned_on", "updated_on",
+            "source", "remarks", "assigned_on", "updated_on",
         ])
     from_date, to_date = win
     where = "session_date BETWEEN :a AND :b"
@@ -1243,7 +1244,7 @@ def get_mock_interview_assignments(
         f"""
         SELECT id, extended_ae_email, session_date, slot_time, batch_code,
                c_alias, trainer_email, trainer_name, program_name, status,
-               source, assigned_on, updated_on
+               source, remarks, assigned_on, updated_on
         FROM {MOCK_INTERVIEW_TABLE}
         WHERE {where}
         """
