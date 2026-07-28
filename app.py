@@ -1379,6 +1379,42 @@ def _render_training_cards(df: pd.DataFrame, key_prefix: str) -> None:
             )
 
 
+# Working-day boundaries for the Calendar wizard's free-time calculation.
+# HARD CAP, deliberately independent of whatever CMIS happens to have data
+# for on a given day: a half-hour slot with nobody's session recorded in it
+# is still free time within the working day, not "outside the day" -- and a
+# stray CMIS row after hours (if one ever exists) should not stretch what
+# counts as the visible working day either. Update these two if working
+# hours change.
+WORKING_DAY_START_MIN = 10 * 60   # 10:00 AM
+WORKING_DAY_END_MIN = 18 * 60      # 06:00 PM
+
+
+def _minutes_to_ampm(mins: int) -> str:
+    h, m = divmod(mins, 60)
+    period = "AM" if h < 12 else "PM"
+    h12 = h % 12 or 12
+    return f"{h12:02d}:{m:02d} {period}"
+
+
+def _canonical_working_day_slots(
+    start_min: int = WORKING_DAY_START_MIN,
+    end_min: int = WORKING_DAY_END_MIN,
+    step: int = 30,
+) -> list[str]:
+    """Half-hour slot_time strings covering the fixed working day, in the
+    exact 'HH:MM AM/PM - HH:MM AM/PM' format CMIS uses (e.g.
+    '10:00 AM - 10:30 AM'), so they match real CMIS slot_time values
+    directly for filtering/membership checks.
+    """
+    slots = []
+    t = start_min
+    while t < end_min:
+        slots.append(f"{_minutes_to_ampm(t)} - {_minutes_to_ampm(t + step)}")
+        t += step
+    return slots
+
+
 def _calendar_wizard_tab(user, role):
     """Single-day view: Training (fixed, card view) -> Mock Interview ->
     Evaluation. All three sections are always visible together (not gated
@@ -1444,12 +1480,11 @@ def _calendar_wizard_tab(user, role):
         training_display = _merge_consecutive(training)
         _render_training_cards(training_display, key_prefix="cal_wizard_train")
 
-    # ---- Build the day's full slot grid (system-wide + own CMIS rows) --
-    day_grid: set = set()
-    if not all_day.empty:
-        day_grid |= set(all_day["slot_time"].dropna().unique())
-    if not own_cal.empty:
-        day_grid |= set(own_cal["slot_time"].dropna().unique())
+    # ---- The day's slot grid is the FIXED working day (10 AM-6 PM), not
+    # whatever CMIS happens to have data for -- a slot nobody's scheduled in
+    # is still free time, and the working day shouldn't silently stretch if
+    # a stray CMIS row exists after hours.
+    day_grid = set(_canonical_working_day_slots())
     free_slots = day_grid - training_slot_times
 
     if not free_slots:
