@@ -1225,6 +1225,68 @@ def _my_core_tab(user):
 
 
 
+def _day_part(slot_time: str) -> str:
+    """Morning / Afternoon / Evening bucket from a slot's start time."""
+    mins = _slot_start_minutes(slot_time)
+    if mins < 12 * 60:
+        return "\U0001F305 Morning"
+    if mins < 16 * 60:
+        return "\U0001F31E Afternoon"
+    return "\U0001F307 Evening"
+
+
+def _grouped_session_picker(display_df: pd.DataFrame, key_prefix: str):
+    """Render a day-part-grouped, trainer-sorted picker instead of one flat
+    dropdown -- Morning / Afternoon / Evening sections, each a compact table
+    plus a radio scoped to just that section, so it's obvious at a glance
+    which sessions are morning vs afternoon vs evening.
+
+    Returns the picked row (a pandas Series) if exactly one radio across all
+    sections has a real pick, else None (and warns if more than one does).
+    """
+    if display_df.empty:
+        return None
+
+    d = display_df.copy()
+    d["_trainer"] = (d["f_name"].fillna("") + " " + d["l_name"].fillna("")).str.strip()
+    d["_part"] = d["slot_time"].apply(_day_part)
+    d["_sort"] = d["slot_time"].apply(_slot_start_minutes)
+    d = d.sort_values(["_part", "_trainer", "_sort"])
+
+    picks: dict[str, pd.Series] = {}
+    for part in ["\U0001F305 Morning", "\U0001F31E Afternoon", "\U0001F307 Evening"]:
+        grp = d[d["_part"] == part]
+        if grp.empty:
+            continue
+        st.markdown(f"**{part}**")
+        st.dataframe(
+            grp[["slot_time", "_trainer", "c_alias", "batch_code"]].rename(columns={
+                "slot_time": "Time", "_trainer": "Trainer",
+                "c_alias": "Module", "batch_code": "Batch",
+            }),
+            hide_index=True, use_container_width=True,
+        )
+        labels = [
+            f"{r['slot_time']}  \u00b7  {r['_trainer']}  \u00b7  "
+            f"{r.get('c_alias','') or ''}  \u00b7  {r.get('batch_code','') or ''}"
+            for _, r in grp.iterrows()
+        ]
+        options = ["\u2014 none \u2014"] + labels
+        choice = st.radio(
+            f"Pick from {part}", options, key=f"{key_prefix}_{part}",
+            label_visibility="collapsed",
+        )
+        if choice != "\u2014 none \u2014":
+            picks[part] = grp.iloc[labels.index(choice)]
+
+    if not picks:
+        return None
+    if len(picks) > 1:
+        st.warning("Pick a session in only ONE time-of-day section, then Save.")
+        return None
+    return next(iter(picks.values()))
+
+
 def _calendar_wizard_tab(user, role):
     """Single-day wizard: Training (locked) -> Evaluation (free time) ->
     Mock Interview (whatever free time is left after any evaluation pick).
@@ -1315,16 +1377,8 @@ def _calendar_wizard_tab(user, role):
         st.caption("No sessions from your aligned faculty are available to evaluate in the free time on this day.")
     else:
         eval_display = _merge_consecutive(eval_candidates)
-        eval_display["_label"] = (
-            eval_display["slot_time"].astype(str) + "  \u00b7  "
-            + (eval_display["f_name"].fillna("") + " " + eval_display["l_name"].fillna("")).str.strip()
-            + "  \u00b7  " + eval_display["c_alias"].fillna("").astype(str)
-            + "  \u00b7  " + eval_display["batch_code"].fillna("").astype(str)
-        )
-        options = ["\u2014 none \u2014"] + eval_display["_label"].tolist()
-        pick = st.selectbox("Session to observe", options, key="cal_wizard_eval_pick")
-        if pick != "\u2014 none \u2014":
-            row = eval_display[eval_display["_label"] == pick].iloc[0]
+        row = _grouped_session_picker(eval_display, key_prefix="cal_wizard_eval")
+        if row is not None:
             if st.button("\U0001F4BE Save evaluation pick", key="cal_wizard_eval_save"):
                 # A merged class fans the write out across EVERY 30-min slot
                 # it spans -- identical to how the Evaluations tab saves a
@@ -1379,16 +1433,8 @@ def _calendar_wizard_tab(user, role):
 
     st.markdown("#### \U0001F3AF Mock Interview")
     mi_display = _merge_consecutive(mi_candidates)
-    mi_display["_label"] = (
-        mi_display["slot_time"].astype(str) + "  \u00b7  "
-        + (mi_display["f_name"].fillna("") + " " + mi_display["l_name"].fillna("")).str.strip()
-        + "  \u00b7  " + mi_display["c_alias"].fillna("").astype(str)
-        + "  \u00b7  " + mi_display["batch_code"].fillna("").astype(str)
-    )
-    mi_options = ["\u2014 none \u2014"] + mi_display["_label"].tolist()
-    mi_pick = st.selectbox("Mock Interview session", mi_options, key="cal_wizard_mi_pick")
-    if mi_pick != "\u2014 none \u2014":
-        mrow = mi_display[mi_display["_label"] == mi_pick].iloc[0]
+    mrow = _grouped_session_picker(mi_display, key_prefix="cal_wizard_mi")
+    if mrow is not None:
         if st.button("\U0001F4BE Save Mock Interview pick", key="cal_wizard_mi_save"):
             members = mrow.get("_members")
             if not isinstance(members, (list, tuple)) or not members:
