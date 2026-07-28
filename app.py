@@ -1415,21 +1415,75 @@ def _canonical_working_day_slots(
     return slots
 
 
+def _render_day_schedule_summary(
+    training_display: pd.DataFrame,
+    eval_claims_display: pd.DataFrame,
+    mi_claims_display: pd.DataFrame,
+) -> None:
+    """Training + whatever Evaluation/Mock Interview is already saved for
+    this day, merged into ONE chronological list -- so after saving a pick
+    in either section below, the person can see their whole day's committed
+    schedule lined up together at a glance, instead of having to piece it
+    together from three separate sections.
+    """
+    rows = []
+
+    def _txt(v) -> str:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        s = str(v).strip()
+        return "" if s.lower() in ("nan", "none", "null") else s
+
+    if not training_display.empty:
+        for _, r in training_display.iterrows():
+            detail = " \u00b7 ".join(x for x in (_txt(r.get("c_alias")), _txt(r.get("batch_code"))) if x)
+            rows.append((r["slot_time"], "\U0001F3EB Training", "You", detail, "scard-lock"))
+
+    if not eval_claims_display.empty:
+        for _, r in eval_claims_display.iterrows():
+            detail = " \u00b7 ".join(x for x in (_txt(r.get("module")), _txt(r.get("batch_code"))) if x)
+            rows.append((r["slot_time"], "\U0001F4DD Evaluation", "You", detail, "scard-mine"))
+
+    if not mi_claims_display.empty:
+        for _, r in mi_claims_display.iterrows():
+            trainer = _txt(r.get("trainer_name")) or _txt(r.get("trainer_email")) or "Unknown trainer"
+            detail = " \u00b7 ".join(x for x in (_txt(r.get("c_alias")), _txt(r.get("batch_code"))) if x)
+            rows.append((r["slot_time"], "\U0001F3AF Mock Interview", trainer, detail, "scard-mine"))
+
+    if not rows:
+        st.caption("Nothing booked yet for this day.")
+        return
+
+    rows.sort(key=lambda row: _slot_start_minutes(row[0]))
+    for slot_time, kind, who, detail, css in rows:
+        sub = who if not detail else f"{who} \u00b7 {detail}"
+        st.markdown(
+            f"""<div class="scard {css}">
+              <div class="scard-top">\U0001F551 {slot_time} &nbsp;\u00b7&nbsp; {kind}</div>
+              <div class="scard-sub">{sub}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+
 def _calendar_wizard_tab(user, role):
-    """Single-day view: Training (fixed, card view) -> Mock Interview ->
-    Evaluation. All three sections are always visible together (not gated
-    behind each other) -- each has its own independent Save button, and both
-    Mock Interview and Evaluation draw candidates from the same free-time
-    set (whatever is left after Training).
+    """Single-day view: a top "Your Schedule Today" summary (Training +
+    whatever Evaluation/Mock Interview you've already saved, merged into one
+    chronological list) followed by Training (fixed) -> Mock Interview ->
+    Evaluation, each independently pickable.
 
     A slot counts as TRAINING only when its CMIS-derived default is
-    'teaching' -- everything else (including times with no CMIS row for this
-    member at all) is free time, available for evaluation/MI picking.
+    'teaching' -- everything else is free time within the fixed working day
+    (see _canonical_working_day_slots), available for evaluation/MI picking.
+
+    Cross-exclusion: once a slot is saved as a Mock Interview, it drops out
+    of the Evaluation candidate list for this day, and vice versa -- a
+    single half-hour can't be booked as both at once. This is recomputed
+    from the DB on every render, so it updates the moment either side saves.
 
     Contiguous 30-min CMIS rows (same trainer/date/batch, back-to-back) are
     merged into one row per real class -- same _merge_consecutive() the
-    Evaluations tab uses -- so this looks and behaves like the rest of the
-    app rather than showing raw 30-min slivers.
+    Evaluations tab uses.
     """
     st.markdown("### \U0001F4C5 Calendar")
     email = user["email"]
@@ -1461,15 +1515,13 @@ def _calendar_wizard_tab(user, role):
         all_day = all_day.copy()
         all_day["_date"] = pd.to_datetime(all_day["s_date"]).dt.date
 
-    # ---- Section 1: Training -- fixed, card view, no choice offered ------
-    st.markdown("#### \U0001F3EB Training (fixed)")
+    # ---- Training: fixed, no choice offered --------------------------
     training = pd.DataFrame()
     if not own_cal.empty:
         training = own_cal[own_cal["default_task"] == "teaching"].copy()
     training_slot_times = set(training["slot_time"]) if not training.empty else set()
-    if training.empty:
-        st.caption("No teaching slots on this day.")
-    else:
+    training_display = pd.DataFrame()
+    if not training.empty:
         # resolve_member_calendar's own_cal never selects email_id (it's
         # only used in the WHERE filter, not returned) -- but
         # _merge_consecutive requires it for grouping/sorting. Every row
@@ -1478,6 +1530,43 @@ def _calendar_wizard_tab(user, role):
         training = training.copy()
         training["email_id"] = email
         training_display = _merge_consecutive(training)
+
+    # ---- Already-saved Evaluation / Mock Interview picks for this day,
+    # merged the same way, so the top summary reads like real classes and
+    # the cross-exclusion below works on whole merged blocks. ----------
+    eval_claims_raw = db.get_selections_for_role(role, email, picked_day, picked_day)
+    eval_claims_raw = eval_claims_raw[eval_claims_raw["status"].isin(CLAIMED)].copy() \
+        if not eval_claims_raw.empty else eval_claims_raw
+    eval_claimed_slots = set()
+    eval_claims_display = pd.DataFrame()
+    if not eval_claims_raw.empty:
+        eval_claims_raw["email_id"] = email
+        eval_claims_raw["_date"] = pd.to_datetime(eval_claims_raw["session_date"]).dt.date
+        eval_claimed_slots = set(eval_claims_raw["slot_time"])
+        eval_claims_display = _merge_consecutive(eval_claims_raw)
+
+    mi_claims_raw = db.get_mock_interview_assignments(email, picked_day, picked_day)
+    mi_claims_raw = mi_claims_raw[mi_claims_raw["status"].isin(CLAIMED)].copy() \
+        if not mi_claims_raw.empty else mi_claims_raw
+    mi_claimed_slots = set()
+    mi_claims_display = pd.DataFrame()
+    if not mi_claims_raw.empty:
+        mi_claims_raw["email_id"] = email
+        mi_claims_raw["_date"] = pd.to_datetime(mi_claims_raw["session_date"]).dt.date
+        mi_claimed_slots = set(mi_claims_raw["slot_time"])
+        mi_claims_display = _merge_consecutive(mi_claims_raw)
+
+    # ---- Top summary: Training + saved Evaluation + saved Mock Interview,
+    # merged into one chronological "Your Schedule Today" list -----------
+    st.markdown("#### \U0001F5D3\uFE0F Your Schedule Today")
+    _render_day_schedule_summary(training_display, eval_claims_display, mi_claims_display)
+    st.divider()
+
+    # ---- Training (fixed) section, card view, no choice offered --------
+    st.markdown("#### \U0001F3EB Training (fixed)")
+    if training_display.empty:
+        st.caption("No teaching slots on this day.")
+    else:
         _render_training_cards(training_display, key_prefix="cal_wizard_train")
 
     # ---- The day's slot grid is the FIXED working day (10 AM-6 PM), not
@@ -1493,15 +1582,17 @@ def _calendar_wizard_tab(user, role):
 
     st.divider()
 
-    # ---- Section 2: Mock Interview -- FIRST, nationwide, in free time ---
+    # ---- Mock Interview -- FIRST, nationwide, in free time NOT already
+    # taken by a saved Evaluation pick today -----------------------------
     st.markdown("#### \U0001F3AF Mock Interview")
+    mi_free_slots = free_slots - eval_claimed_slots
     mi_candidates = db.get_all_mock_interview_sessions(picked_day, picked_day)
     if not mi_candidates.empty:
-        mi_candidates = mi_candidates[mi_candidates["slot_time"].isin(free_slots)].copy()
+        mi_candidates = mi_candidates[mi_candidates["slot_time"].isin(mi_free_slots)].copy()
         mi_candidates["_date"] = pd.to_datetime(mi_candidates["s_date"]).dt.date
 
     if mi_candidates.empty:
-        st.caption("No Mock Interview sessions in the free time on this day.")
+        st.caption("No Mock Interview sessions in the remaining free time on this day.")
     else:
         mi_display = _merge_consecutive(mi_candidates)
         mi_key_prefix = "cal_wizard_mi"
@@ -1534,24 +1625,25 @@ def _calendar_wizard_tab(user, role):
 
     st.divider()
 
-    # ---- Section 3: Evaluation -- reuses the SAME card component (and its
-    # built-in Available/Mine/Teammate's status handling + Save) as the
-    # Evaluations tab -- scoped to this one day's free time.
+    # ---- Evaluation -- reuses the SAME card component (and its built-in
+    # Available/Mine/Teammate's status handling + Save) as the Evaluations
+    # tab -- scoped to this day's free time NOT already taken by a saved
+    # Mock Interview pick today. ------------------------------------------
     st.markdown("#### \U0001F4DD Evaluation")
+    eval_free_slots = free_slots - mi_claimed_slots
     eval_candidates = pd.DataFrame()
     if not all_day.empty:
         eval_candidates = all_day[
-            all_day["slot_time"].isin(free_slots)
+            all_day["slot_time"].isin(eval_free_slots)
             & (all_day["email_id"].fillna("").str.lower() != email.lower())
             & (all_day["email_id"].fillna("").str.lower().isin(aligned_faculty))
         ].copy()
 
     if eval_candidates.empty:
-        st.caption("No sessions from your aligned faculty are available to evaluate in the free time on this day.")
+        st.caption("No sessions from your aligned faculty are available to evaluate in the remaining free time on this day.")
     else:
         eval_display = _merge_consecutive(eval_candidates)
         _sessions_table(eval_display, core_ae_email, picked_day, picked_day, role, email, key_prefix="cal_wizard_eval_")
-
 
 
 def _sessions_tab(user, role):
