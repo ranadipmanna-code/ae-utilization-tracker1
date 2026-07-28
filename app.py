@@ -1241,6 +1241,22 @@ def _calendar_wizard_tab(user, role):
     st.markdown("### \U0001F4C5 Calendar")
     email = user["email"]
 
+    # Evaluation candidates must be scoped to the trainers this person is
+    # actually aligned with -- exactly the same core_ae_faculty_map lookup
+    # the Evaluations tab uses. Without this, "free time" pulled from every
+    # CMIS session nationwide, which is correct for the Mock Interview step
+    # below but wrong for Evaluation.
+    core_options = _core_options_for(role, email)
+    core_ae_email = core_options[0] if core_options else None
+    if len(core_options) > 1:
+        core_ae_email = st.selectbox("Core AE Member", core_options, key="cal_wizard_core_ae")
+    aligned_faculty = set()
+    if core_ae_email:
+        aligned_faculty = {f.lower() for f in db.faculty_emails_for_core(core_ae_email)}
+    if not aligned_faculty:
+        st.warning("No Core AE mapping found for your account in core_ae_faculty_map.")
+        return
+
     w_lo, w_hi = db.visible_window()
     picked_day = st.date_input(
         "Choose a day", value=w_lo, min_value=w_lo, max_value=w_hi,
@@ -1253,6 +1269,7 @@ def _calendar_wizard_tab(user, role):
     if not all_day.empty:
         all_day = all_day.copy()
         all_day["_date"] = pd.to_datetime(all_day["s_date"]).dt.date
+
 
     # ---- Step 1: Training -- fixed, no choice offered, merged for display
     st.markdown("#### \U0001F3EB Training (fixed)")
@@ -1291,10 +1308,11 @@ def _calendar_wizard_tab(user, role):
         eval_candidates = all_day[
             all_day["slot_time"].isin(free_slots)
             & (all_day["email_id"].fillna("").str.lower() != email.lower())
+            & (all_day["email_id"].fillna("").str.lower().isin(aligned_faculty))
         ].copy()
 
     if eval_candidates.empty:
-        st.caption("No sessions available to evaluate in the free time on this day.")
+        st.caption("No sessions from your aligned faculty are available to evaluate in the free time on this day.")
     else:
         eval_display = _merge_consecutive(eval_candidates)
         eval_display["_label"] = (
