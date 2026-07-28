@@ -1428,7 +1428,7 @@ def _calendar_wizard_tab(user, role):
         st.caption("No sessions from your aligned faculty are available to evaluate in the free time on this day.")
     else:
         eval_display = _merge_consecutive(eval_candidates)
-        _sessions_table(eval_display, core_ae_email, picked_day, picked_day, role, email)
+        _sessions_table(eval_display, core_ae_email, picked_day, picked_day, role, email, key_prefix="cal_wizard_eval_")
 
     # ---- Recompute free time AFTER any evaluation already claimed today -
     already = db.get_selections_for_role(role, email, picked_day, picked_day)
@@ -1632,7 +1632,7 @@ def _sessions_tab(user, role):
     if merge_slots:
         sessions = _merge_consecutive(sessions)
 
-    _sessions_table(sessions, core_ae_email, date_from, date_to, role, user["email"])
+    _sessions_table(sessions, core_ae_email, date_from, date_to, role, user["email"], key_prefix="eval_tab_")
 
 
 def _mock_interview_tab(user, role):
@@ -2002,7 +2002,7 @@ def _fmt_duration(r) -> str:
     return _mins_to_text(mins) if mins is not None else "—"
 
 
-def _sessions_table(sessions, core_ae_email, date_from, date_to, role, user_email):
+def _sessions_table(sessions, core_ae_email, date_from, date_to, role, user_email, key_prefix=""):
     """
     Card-based session list, grouped by time slot. Each session is a clean card
     with a one-tap claim control. Cross-visibility: everyone on the team sees
@@ -2138,7 +2138,7 @@ def _sessions_table(sessions, core_ae_email, date_from, date_to, role, user_emai
     # removed on request.)
     pending: dict = {}  # key -> (new status, row) — collected then saved together
 
-    saved = _render_session_cards(df, user_email, can_select, pending)
+    saved = _render_session_cards(df, user_email, can_select, pending, key_prefix=key_prefix)
 
     if saved:
         if not pending:
@@ -2206,7 +2206,7 @@ def main():
         dashboard()
 
 
-def _render_session_cards(df, user_email, can_select, pending) -> bool:
+def _render_session_cards(df, user_email, can_select, pending, key_prefix="") -> bool:
     """The original card list, kept as an opt-in view.
 
     Costs roughly four Streamlit elements per row, so it is paginated hard.
@@ -2218,7 +2218,7 @@ def _render_session_cards(df, user_email, can_select, pending) -> bool:
     if pages > 1:
         p1, p2 = st.columns([1, 4])
         with p1:
-            page = st.number_input("Page", 1, pages, 1, 1, key="page_no")
+            page = st.number_input("Page", 1, pages, 1, 1, key=f"{key_prefix}page_no")
         with p2:
             st.markdown(
                 f"<div style='padding-top:32px;font-size:.82rem;opacity:.6'>"
@@ -2246,7 +2246,7 @@ def _render_session_cards(df, user_email, can_select, pending) -> bool:
 
     # `pending` is the caller's dict — fill it, never rebind it.
 
-    with st.form(f"claim_form_{page}"):
+    with st.form(f"{key_prefix}claim_form_{page}"):
         shown_section = None
         for (is_mi, trainer), grp in chunk.groupby(["_is_mi", "Trainer"], sort=False):
             if is_mi != shown_section:
@@ -2330,7 +2330,7 @@ def _render_session_cards(df, user_email, can_select, pending) -> bool:
                         sel = st.selectbox(
                             "status", STATUS_OPTIONS,
                             index=default_idx,
-                            key=f"st_{key}_{page}", label_visibility="collapsed",
+                            key=f"{key_prefix}st_{key}_{page}", label_visibility="collapsed",
                         )
                         if sel != displayed_status:
                             pending[key] = (sel, r)
