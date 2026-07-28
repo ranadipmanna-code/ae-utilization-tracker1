@@ -1390,6 +1390,13 @@ def _calendar_wizard_tab(user, role):
     if training.empty:
         st.caption("No teaching slots on this day.")
     else:
+        # resolve_member_calendar's own_cal never selects email_id (it's
+        # only used in the WHERE filter, not returned) -- but
+        # _merge_consecutive requires it for grouping/sorting. Every row
+        # here already belongs to this one person, so it's always safe to
+        # fill it in with their own address.
+        training = training.copy()
+        training["email_id"] = email
         training_display = _merge_consecutive(training)
         for _, r in training_display.sort_values("slot_time").iterrows():
             bits = [str(r["slot_time"])]
