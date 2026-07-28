@@ -985,18 +985,19 @@ def dashboard():
         unsafe_allow_html=True,
     )
 
-    # Evaluation removed (change #3). Tabs differ per role.
-    # The MI Pool tab sits next to Sessions for every role — a Core AE has to
-    # be able to see what the Extended AEs have and haven't picked up, which
-    # is exactly what was missing before.
+    # Restructured: Calendar (wizard) and Mock Interview (nationwide pool,
+    # manual-only now that auto-assign is removed) are shared entry points
+    # for everyone. "My Mock Interviews" and the old MI Pool tab are folded
+    # into the single Mock Interview tab below. The old free-range Calendar
+    # tab is gone too — replaced by the single-day wizard.
     if role == "admin":
-        made = st.tabs(["📋  Sessions", "🎯  My Mock Interviews", "🎯  MI Pool",
+        made = st.tabs(["📅  Calendar", "📝  Evaluations", "🎯  Mock Interview",
                         "👥  My Extended AE Team",
-                        "📊  Weekly Summary", "📅  Calendar", "🔗  Email Health"])
+                        "📊  Weekly Summary", "🔗  Email Health"])
         with made[0]:
-            _sessions_tab(user, role)
+            _calendar_wizard_tab(user, role)
         with made[1]:
-            _mock_interview_tab(user, role)
+            _sessions_tab(user, role)
         with made[2]:
             mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
@@ -1004,37 +1005,31 @@ def dashboard():
         with made[4]:
             _summary_tab(user, role)
         with made[5]:
-            _calendar_tab(user, role)
-        with made[6]:
             _email_health_tab()
     elif role == "core_ae":
-        made = st.tabs(["📋  Sessions", "🎯  My Mock Interviews", "🎯  MI Pool",
-                        "👥  My Extended AE Team", "📊  Weekly Summary", "📅  Calendar"])
+        made = st.tabs(["📅  Calendar", "📝  Evaluations", "🎯  Mock Interview",
+                        "👥  My Extended AE Team", "📊  Weekly Summary"])
         with made[0]:
-            _sessions_tab(user, role)
+            _calendar_wizard_tab(user, role)
         with made[1]:
-            _mock_interview_tab(user, role)
+            _sessions_tab(user, role)
         with made[2]:
             mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
             _rollup_tab(user, role)
         with made[4]:
             _summary_tab(user, role)
-        with made[5]:
-            _calendar_tab(user, role)
     else:  # extended_ae
-        made = st.tabs(["📋  Sessions", "🎯  My Mock Interviews", "🎯  MI Pool",
-                        "🧭  My Alignment", "📅  Calendar"])
+        made = st.tabs(["📅  Calendar", "📝  Evaluations", "🎯  Mock Interview",
+                        "🧭  My Alignment"])
         with made[0]:
-            _sessions_tab(user, role)
+            _calendar_wizard_tab(user, role)
         with made[1]:
-            _mock_interview_tab(user, role)
+            _sessions_tab(user, role)
         with made[2]:
             mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
             _my_core_tab(user)
-        with made[4]:
-            _calendar_tab(user, role)
 
 
 def _summary_tab(user, role):
@@ -1229,327 +1224,137 @@ def _my_core_tab(user):
         st.caption(f"…and {len(faculty) - 40} more")
 
 
-def _calendar_members_for(user, role) -> list[tuple[str, str]]:
-    """(email, display label) options this user may view on the calendar.
-    Everyone can always see themselves; Core AE/Admin also see their team."""
-    roles_df = db.get_user_roles()
-    name_by = {}
-    if not roles_df.empty:
-        name_by = dict(zip(roles_df["email"].str.lower(), roles_df["name"]))
 
-    def _label(email: str) -> str:
-        nm = name_by.get(email.lower(), email.split("@")[0])
-        return f"{nm}  ·  {email}"
+def _calendar_wizard_tab(user, role):
+    """Single-day wizard: Training (locked) -> Evaluation (free time) ->
+    Mock Interview (whatever free time is left after any evaluation pick).
 
-    opts = [(user["email"], f"{_label(user['email'])}  (you)")]
-    if role == "core_ae":
-        for e in db.extended_aes_for_core(user["email"]):
-            opts.append((e, _label(e)))
-    elif role == "admin":
-        if not roles_df.empty:
-            for _, r in roles_df.iterrows():
-                if r["email"].lower() != user["email"].lower():
-                    opts.append((r["email"], _label(r["email"])))
-    return opts
-
-
-def _slot_end_minutes(slot: str) -> int:
-    """Minutes-since-midnight for a slot's END, e.g. '11:00 AM - 11:30 AM' -> 690.
-    Companion to _slot_start_minutes; used to detect back-to-back runs."""
-    if not slot or "-" not in str(slot):
-        return -1
-    try:
-        end = str(slot).split("-", 1)[1].strip()
-        t = pd.to_datetime(end, format="%I:%M %p")
-        return t.hour * 60 + t.minute
-    except Exception:
-        return -1
-
-
-def _merge_calendar_runs(grp: pd.DataFrame) -> list[dict]:
-    """Collapse a day's slots into contiguous same-task runs for display.
-
-    Two rows merge only when ALL of these hold: back-to-back in time (one
-    slot's end == the next one's start), same batch_code, same c_alias, same
-    *current* task_type, and — if the task is 'other' — the same note. Same
-    c_alias also guarantees the same default_task, so a merged card's "clear
-    override" behaviour stays correct for every slot underneath it.
-
-    Deliberately NOT merged across a c_alias change even when the task_type
-    happens to match (e.g. plr_mi1 followed by plr_mi2, both Mock Interview):
-    keeping them separate preserves each slot's own default for the "reset to
-    CMIS default" path, and avoids silently combining two different interview
-    rounds into one card.
-
-    Returns a list of dicts, each with the merged slot_time string, the
-    representative row's fields, and `_members`: the original rows (as Series)
-    that make up the run, in order — used when saving to fan the write across
-    every real slot.
+    A slot counts as TRAINING only when its CMIS-derived default is
+    'teaching' -- everything else (including times with no CMIS row for this
+    member at all) is free time, available for evaluation/MI picking.
     """
-    rows = [r for _, r in grp.iterrows()]
-    runs: list[dict] = []
-    for r in rows:
-        if runs:
-            prev = runs[-1]
-            same_group = (
-                r.get("batch_code") == prev["_rep"].get("batch_code")
-                and r.get("c_alias") == prev["_rep"].get("c_alias")
-                and r["task_type"] == prev["_rep"]["task_type"]
-                and bool(r.get("_locked_mi")) == bool(prev["_rep"].get("_locked_mi"))
-                and (r["task_type"] != "other"
-                     or (r.get("other_note") or "") == (prev["_rep"].get("other_note") or ""))
-            )
-            contiguous = _slot_end_minutes(prev["_members"][-1]["slot_time"]) == _slot_start_minutes(r["slot_time"])
-            if same_group and contiguous:
-                prev["_members"].append(r)
-                start = str(prev["_members"][0]["slot_time"]).split("-", 1)[0].strip()
-                end = str(r["slot_time"]).split("-", 1)[1].strip()
-                prev["slot_time"] = f"{start} - {end}"
-                continue
-        runs.append({"_rep": r, "_members": [r], "slot_time": r["slot_time"]})
-    return runs
+    st.markdown("### 📅 Calendar")
+    email = user["email"]
 
-
-def _calendar_tab(user, role):
-    st.markdown("### 📅 Calendar — CMIS task defaults & assignment")
-
-    members = _calendar_members_for(user, role)
-    labels = [lbl for _, lbl in members]
-    pick_idx = st.selectbox(
-        "Member", range(len(members)), format_func=lambda i: labels[i], key="cal_member"
+    w_lo, w_hi = db.visible_window()
+    picked_day = st.date_input(
+        "Choose a day", value=w_lo, min_value=w_lo, max_value=w_hi,
+        key="cal_wizard_day",
     )
-    member_email, _ = members[pick_idx]
-    is_editable = member_email.lower() == user["email"].lower()
-    member_role = db.role_for_email(member_email) or role
 
-    # Date range comes from the Sessions tab, not an independent picker here —
-    # the two tabs are meant to always show the same window. If the Sessions
-    # tab hasn't been visited yet this session, fall back to a sensible
-    # default (today -> +13 days, matching Sessions' own first-load default)
-    # so Calendar still works standalone.
-    ws = st.session_state.get("shared_from") or date.today()
-    we = st.session_state.get("shared_to") or (date.today() + timedelta(days=13))
-    range_note = "" if is_editable else "  ·  🔒 view-only (not your calendar)"
-    st.caption(f"{ws} → {we}  ·  matches the Sessions tab date range{range_note}")
+    with st.spinner("Loading this day's schedule…"):
+        own_cal = db.resolve_member_calendar(email, picked_day, picked_day)
+        all_day = db.fetch_sessions_all(picked_day, picked_day, limit=5000)
 
-    with st.spinner("Fetching this member's schedule…"):
-        cal = db.resolve_member_calendar(member_email, ws, we)
+    # ---- Step 1: Training -- fixed, no choice offered -----------------
+    st.markdown("#### 🏫 Training (fixed)")
+    training = pd.DataFrame()
+    if not own_cal.empty:
+        training = own_cal[own_cal["default_task"] == "teaching"].copy()
+    if training.empty:
+        st.caption("No teaching slots on this day.")
+        training_slot_times = set()
+    else:
+        training = training.sort_values("slot_time")
+        for _, r in training.iterrows():
+            bits = [str(r["slot_time"])]
+            if r.get("c_alias"):
+                bits.append(str(r["c_alias"]))
+            if r.get("batch_code"):
+                bits.append(str(r["batch_code"]))
+            st.markdown(f"- **{bits[0]}**  ·  " + "  ·  ".join(bits[1:]))
+        training_slot_times = set(training["slot_time"])
 
-    # Own-slot (date, slot_time) pairs, captured BEFORE any synthetic rows are
-    # folded in -- used below to make sure a cross-pod claim never gets
-    # rendered twice on the rare occasion it coincides with one of the
-    # member's own CMIS slots (which already surfaces it correctly via the
-    # normal ae_slot_task override path inside resolve_member_calendar).
-    own_keys = set()
-    if not cal.empty:
-        own_keys = set(zip(cal["_date"], cal["slot_time"]))
+    # ---- Build the day's full slot grid (system-wide + own CMIS rows) --
+    day_grid: set = set()
+    if not all_day.empty:
+        day_grid |= set(all_day["slot_time"].dropna().unique())
+    if not own_cal.empty:
+        day_grid |= set(own_cal["slot_time"].dropna().unique())
+    free_slots = day_grid - training_slot_times
 
-    _SYNTH_COLS = ["_date", "slot_time", "task_type", "default_task",
-                   "is_default", "other_note", "ref_selection_id", "set_by",
-                   "batch_code", "c_alias", "slot_name", "program_name",
-                   "trainer_name", "_locked_mi"]
-
-    # Confirmed (Selected) cross-pod Mock Interview assignments live in their
-    # own table -- they belong to a DIFFERENT trainer's slot, not this
-    # member's own CMIS schedule, so they never show up via the own-slots
-    # query above. Fold them in here as extra, locked calendar rows so a
-    # member's Calendar reflects everything they've actually committed to.
-    my_mi = db.get_my_mock_interview_claims(member_email, ws, we)
-    if not my_mi.empty:
-        confirmed_mi = my_mi[my_mi["status"] == "Selected"].copy()
-        if not confirmed_mi.empty:
-            confirmed_mi = confirmed_mi[
-                ~confirmed_mi.apply(lambda r: (r["_date"], r["slot_time"]) in own_keys, axis=1)
-            ]
-        if not confirmed_mi.empty:
-            confirmed_mi["task_type"] = "mock_interview"
-            confirmed_mi["default_task"] = "mock_interview"
-            confirmed_mi["is_default"] = True
-            confirmed_mi["other_note"] = None
-            confirmed_mi["ref_selection_id"] = None
-            confirmed_mi["set_by"] = None
-            confirmed_mi["slot_name"] = None
-            confirmed_mi["_locked_mi"] = True
-            cal = pd.concat([cal, confirmed_mi[_SYNTH_COLS]], ignore_index=True, sort=False)
-
-    # Confirmed (Selected/Confirmed) Evaluation claims have the exact same
-    # gap: claiming to OBSERVE another trainer's class writes an override
-    # into ae_slot_task keyed to the observer, but that override only ever
-    # gets picked up by the per-day render loop below if its (date,
-    # slot_time) already exists among the observer's own CMIS rows -- which
-    # it essentially never does, since you're watching someone ELSE teach.
-    # The override was always being written correctly (Sessions tab claiming
-    # worked); it just never had a calendar row to attach to. Same fix as
-    # Mock Interview: fold the claim itself in as a synthetic row.
-    my_claims = db.get_selections_for_role(member_role, member_email, ws, we)
-    if not my_claims.empty:
-        claimed = my_claims[my_claims["status"].isin(CLAIMED)].copy()
-        if not claimed.empty:
-            claimed["_date"] = pd.to_datetime(claimed["session_date"]).dt.date
-            claimed = claimed[
-                ~claimed.apply(lambda r: (r["_date"], r["slot_time"]) in own_keys, axis=1)
-            ]
-        if not claimed.empty:
-            claimed["task_type"] = "evaluation"
-            claimed["default_task"] = "evaluation"
-            claimed["is_default"] = True
-            claimed["other_note"] = None
-            claimed["ref_selection_id"] = claimed["id"]
-            claimed["set_by"] = None
-            claimed["slot_name"] = None
-            claimed["c_alias"] = claimed["module"]
-            claimed["program_name"] = None
-            # The selection tables don't store the observed trainer's name.
-            # Leave it blank rather than KeyError -- the card still renders
-            # (batch/alias identify the session); an empty leading bit is
-            # dropped by the " · ".join filter below.
-            if "trainer_name" not in claimed.columns:
-                claimed["trainer_name"] = None
-            claimed["_locked_mi"] = False
-            cal = pd.concat([cal, claimed[_SYNTH_COLS]], ignore_index=True, sort=False)
-
-    if cal.empty:
-        st.info("No CMIS slots found for this member in this week — nothing to default onto.")
+    if not free_slots:
+        st.info("No free time on this day — fully booked with training.")
         return
-    if "_locked_mi" not in cal.columns:
-        cal["_locked_mi"] = False
-    cal["_locked_mi"] = cal["_locked_mi"].fillna(False)
 
-    counts = cal["task_type"].value_counts().to_dict()
-    chip_row = " ".join(
-        f"<span class='tchip tchip-{_task_css(tt)}'>{_cal_label(tt)} · {counts.get(tt, 0)}</span>"
-        for tt in db.TASK_TYPES if counts.get(tt, 0)
+    # ---- Step 2: Evaluation -- pick ONE session in the free time ------
+    st.markdown("#### 📝 Evaluation")
+    eval_candidates = pd.DataFrame()
+    if not all_day.empty:
+        eval_candidates = all_day[
+            all_day["slot_time"].isin(free_slots)
+            & (all_day["email_id"].fillna("").str.lower() != email.lower())
+        ].copy()
+
+    if eval_candidates.empty:
+        st.caption("No sessions available to evaluate in the free time on this day.")
+    else:
+        eval_candidates["_label"] = (
+            eval_candidates["slot_time"].astype(str) + "  ·  "
+            + (eval_candidates["f_name"].fillna("") + " " + eval_candidates["l_name"].fillna("")).str.strip()
+            + "  ·  " + eval_candidates["c_alias"].fillna("").astype(str)
+            + "  ·  " + eval_candidates["batch_code"].fillna("").astype(str)
+        )
+        options = ["— none —"] + eval_candidates["_label"].tolist()
+        pick = st.selectbox("Session to observe", options, key="cal_wizard_eval_pick")
+        if pick != "— none —":
+            row = eval_candidates[eval_candidates["_label"] == pick].iloc[0]
+            if st.button("💾 Save evaluation pick", key="cal_wizard_eval_save"):
+                db.upsert_selection_for_role(
+                    role, email,
+                    pd.to_datetime(row["s_date"]).date(),
+                    row["slot_time"],
+                    module=row.get("c_alias"),
+                    batch_code=row.get("batch_code"),
+                    status="Selected",
+                )
+                st.success("Saved. Refreshing remaining free time…")
+                st.rerun()
+
+    # ---- Recompute free time AFTER any evaluation already claimed today -
+    already = db.get_selections_for_role(role, email, picked_day, picked_day)
+    eval_claimed_slots = set()
+    if not already.empty:
+        eval_claimed_slots = set(already[already["status"].isin(CLAIMED)]["slot_time"])
+    remaining_free = free_slots - eval_claimed_slots
+
+    if not remaining_free:
+        return  # every free slot is now spoken for -- nothing left to show
+
+    # ---- Step 3: Mock Interview -- only in whatever free time is left --
+    mi_candidates = db.get_all_mock_interview_sessions(picked_day, picked_day)
+    if not mi_candidates.empty:
+        mi_candidates = mi_candidates[mi_candidates["slot_time"].isin(remaining_free)]
+    if mi_candidates.empty:
+        return  # no MI session in the remaining free time -- show nothing
+
+    st.markdown("#### 🎯 Mock Interview")
+    mi_candidates = mi_candidates.copy()
+    mi_candidates["_label"] = (
+        mi_candidates["slot_time"].astype(str) + "  ·  "
+        + (mi_candidates["f_name"].fillna("") + " " + mi_candidates["l_name"].fillna("")).str.strip()
+        + "  ·  " + mi_candidates["c_alias"].fillna("").astype(str)
+        + "  ·  " + mi_candidates["batch_code"].fillna("").astype(str)
     )
-    st.markdown(f"<div class='legend' style='margin:6px 0 14px'>{chip_row}</div>", unsafe_allow_html=True)
-
-    cal["_sort_mins"] = cal["slot_time"].map(_slot_start_minutes)
-    cal = cal.sort_values(["_date", "_sort_mins"]).drop(columns=["_sort_mins"]).reset_index(drop=True)
-
-    pending: dict[str, tuple[str, str | None, pd.Series]] = {}
-    with st.form(f"cal_form_{member_email}_{ws}"):
-        for day, grp in cal.groupby("_date", sort=True):
-            st.markdown(
-                f"<div class='cal-daymark'>{pd.Timestamp(day).strftime('%A, %d %b')}"
-                f"<span class='slot-count'>{len(grp)} slot{'s' if len(grp)!=1 else ''}</span></div>",
-                unsafe_allow_html=True,
+    mi_options = ["— none —"] + mi_candidates["_label"].tolist()
+    mi_pick = st.selectbox("Mock Interview session", mi_options, key="cal_wizard_mi_pick")
+    if mi_pick != "— none —":
+        mrow = mi_candidates[mi_candidates["_label"] == mi_pick].iloc[0]
+        if st.button("💾 Save Mock Interview pick", key="cal_wizard_mi_save"):
+            db.upsert_mock_interview_assignment(
+                extended_ae_email=email,
+                session_date=pd.to_datetime(mrow["s_date"]).date(),
+                slot_time=mrow["slot_time"],
+                batch_code=mrow.get("batch_code"),
+                c_alias=mrow.get("c_alias"),
+                trainer_email=mrow.get("email_id"),
+                trainer_name=(str(mrow.get("f_name") or "") + " " + str(mrow.get("l_name") or "")).strip(),
+                program_name=mrow.get("program_name"),
+                status="Selected",
+                source="manual",
             )
-            for card in _merge_calendar_runs(grp):
-                r = card["_rep"]
-                task = r["task_type"]
-                css = _task_css(task)
-                sub_bits = [_txt_safe(r.get("trainer_name")),
-                            _txt_safe(r.get("batch_code")), _txt_safe(r.get("c_alias")),
-                            _txt_safe(r.get("slot_name")), _txt_safe(r.get("program_name"))]
-                if task == "other" and r.get("other_note"):
-                    sub_bits.append(f"“{r['other_note']}”")
-                sub_line = " · ".join(b for b in sub_bits if b)
-
-                cA, cB = st.columns([4, 1.6])
-                with cA:
-                    st.markdown(
-                        f"""<div class="tcard tcard-{css}">
-                          <div class="tcard-top">🕑 {card['slot_time']}
-                            <span class="tchip tchip-{css}">{_cal_label(task)}</span></div>
-                          <div class="tcard-sub">{sub_line}</div>
-                        </div>""",
-                        unsafe_allow_html=True,
-                    )
-                with cB:
-                    key = f"{r['_date']}|{card['_members'][0]['slot_time']}"
-                    is_locked_mi = bool(r.get("_locked_mi"))
-                    if task == "evaluation":
-                        st.markdown(
-                            "<div class='locked-status'>🔒 via Evaluation<br>"
-                            "<span style='font-weight:400;opacity:.75'>change on Sessions tab</span></div>",
-                            unsafe_allow_html=True,
-                        )
-                    elif task == "teaching" or (r.get("default_task") == "teaching" and not is_locked_mi):
-                        # Mandatory: a scheduled class is always taken by the
-                        # faculty of record -- no dropdown, nothing to choose.
-                        st.markdown(
-                            "<div class='locked-status'>🔒 Training<br>"
-                            "<span style='font-weight:400;opacity:.75'>mandatory</span></div>",
-                            unsafe_allow_html=True,
-                        )
-                    elif is_locked_mi:
-                        # Confirmed on the Mock Interview section -- also
-                        # mandatory, and not this member's own CMIS slot to
-                        # override in the first place.
-                        st.markdown(
-                            "<div class='locked-status'>🔒 Confirmed MI<br>"
-                            "<span style='font-weight:400;opacity:.75'>change on Sessions tab</span></div>",
-                            unsafe_allow_html=True,
-                        )
-                    elif is_editable:
-                        # Options = this slot's own CMIS-derived default first,
-                        # then the manual override tasks (dedup, keep order).
-                        default_task = r.get("default_task") or "mock_interview"
-                        override_tasks = ["training", "project_involvement", "other"]
-                        opts = [default_task] + [t for t in override_tasks
-                                                 if t != default_task]
-                        choice = st.selectbox(
-                            "task", opts,
-                            index=opts.index(task) if task in opts else 0,
-                            format_func=lambda t: db.TASK_LABELS.get(t, t),
-                            key=f"tk_{key}", label_visibility="collapsed",
-                        )
-                        note = None
-                        if choice == "other":
-                            note = st.text_input(
-                                "note", value=r.get("other_note") or "",
-                                key=f"nt_{key}", label_visibility="collapsed",
-                                placeholder="What kind of task?",
-                            )
-                        if choice != task or (choice == "other" and note != (r.get("other_note") or "")):
-                            pending[key] = (choice, note, card["_members"])
-                    else:
-                        st.markdown(f"<div class='locked-status'>{_cal_label(task)}</div>",
-                                    unsafe_allow_html=True)
-
-        saved = st.form_submit_button("💾  Save calendar changes", type="primary",
-                                       use_container_width=True, disabled=not is_editable)
-
-    if saved:
-        if not pending:
-            st.info("No changes to save.")
-        else:
-            n_slots = 0
-            for _, (new_task, note, members) in pending.items():
-                # A merged card writes to EVERY 30-min slot it spans, so the
-                # DB ends up identical to changing each slot by hand. Each
-                # member keeps its own slot_time/slot_name/default_task, since
-                # merging never crosses a c_alias boundary (see
-                # _merge_calendar_runs) — but being explicit here is cheap
-                # insurance against that ever changing.
-                for m in members:
-                    db.set_slot_task(
-                        member_email, member_role, m["_date"], m["slot_time"],
-                        m.get("slot_name"), new_task, other_note=note, set_by=user["email"],
-                        default_task=m.get("default_task"),
-                    )
-                    n_slots += 1
-            db.clear_app_caches()
-            st.success(f"Saved {n_slots} slot{'s' if n_slots != 1 else ''} across "
-                       f"{len(pending)} card{'s' if len(pending) != 1 else ''}.")
+            st.success("Saved.")
             st.rerun()
-
-
-def _task_css(task_type: str) -> str:
-    return {
-        "mock_interview": "mock", "teaching": "teach",
-        "evaluation": "eval", "training": "train",
-        "project_involvement": "proj", "other": "other",
-    }.get(task_type, "mock")
-
-
-def _cal_label(task_type: str) -> str:
-    """Calendar-only display label. 'teaching' shows as 'Training' here per
-    the AE-facing naming for this tab; every other type keeps its normal
-    db.TASK_LABELS text (including the separate 'training' override type,
-    which is a different underlying task and keeps its own 📚 icon)."""
-    if task_type == "teaching":
-        return "🏫 Training"
-    return db.TASK_LABELS.get(task_type, task_type)
 
 
 def _sessions_tab(user, role):
@@ -1567,55 +1372,34 @@ def _sessions_tab(user, role):
         st.info(f"No faculty mapped to {core_ae_email} in core_ae_faculty_map.")
         return
 
-    # A cheap MIN/MAX/COUNT probe sizes the date pickers. The tab used to pull
-    # every session row this faculty has in CMIS -- a horizon that can run to
-    # late 2027 -- purely to read .min()/.max() off the frame, then discard
-    # ~95% of it with a pandas filter. Every later pandas pass then paid for
-    # rows nobody would ever see.
+    # Evaluations tab is now a FIXED rolling 7-day window (today .. today+6),
+    # not a user-editable range — the free-range picker that used to live
+    # here is gone; single-day drill-down now belongs to the Calendar tab.
+    date_from = date.today()
+    date_to = date_from + timedelta(days=6)
+
     lo_d, hi_d, n_total = db.faculty_date_bounds(tuple(faculty))
     if not lo_d or not hi_d:
         st.info("No CMIS sessions found for this Core AE's faculty.")
         return
 
     with st.expander(
-        f"🔎  Filters · {n_total:,} sessions in CMIS ({lo_d} → {hi_d})", expanded=True
+        f"🔎  Filters · {date_from} → {date_to} (next 7 days)", expanded=True
     ):
-        # Dates come FIRST now, because the fetch below is bounded by them.
-        d1, d2, d3 = st.columns(3)
-        default_from = max(lo_d, date.today())
-        if default_from > hi_d:
-            default_from = lo_d
-        # allow the picker to reach CMIS's global max (e.g. Oct 2027), not just
-        # this AE's own last session — so future dates are always selectable.
-        g_lo, g_hi = db.cmis_date_bounds()
-        pick_min = g_lo or lo_d
-        pick_max = g_hi or hi_d
-        with d1:
-            date_from = st.date_input("From", value=default_from, min_value=pick_min, max_value=pick_max)
-        with d2:
-            date_to = st.date_input(
-                "To", value=min(hi_d, default_from + timedelta(days=13)),
-                min_value=pick_min, max_value=pick_max,
-            )
-        with d3:
-            # "Extended AE claimed sessions" is the one Core AEs kept asking
-            # for: from a Core AE login there was previously no way to see
-            # what the Extended AE team had already taken.
-            only_open = st.selectbox(
-                "Show",
-                [
-                    "All sessions",
-                    "Unclaimed only",
-                    "My claims only",
-                    "Extended AE claimed sessions",
-                    "Core AE claimed sessions",
-                    "Mock Interviews only",
-                ],
-            )
-
-        if date_to < date_from:
-            st.warning("‘To’ is before ‘From’ — showing nothing. Widen the range.")
-            return
+        # "Extended AE claimed sessions" is the one Core AEs kept asking
+        # for: from a Core AE login there was previously no way to see
+        # what the Extended AE team had already taken.
+        only_open = st.selectbox(
+            "Show",
+            [
+                "All sessions",
+                "Unclaimed only",
+                "My claims only",
+                "Extended AE claimed sessions",
+                "Core AE claimed sessions",
+                "Mock Interviews only",
+            ],
+        )
 
         with st.spinner("Fetching sessions from CMIS…"):
             sessions = db.fetch_sessions_range_for_faculty(
@@ -1625,6 +1409,7 @@ def _sessions_tab(user, role):
         if sessions.empty:
             st.info(f"No CMIS sessions for this Core AE's faculty between {date_from} and {date_to}.")
             return
+
 
         sessions = sessions.copy()
         sessions["_trainer"] = (
@@ -1654,25 +1439,14 @@ def _sessions_tab(user, role):
                  "work with the raw 30-minute slots individually.",
         )
 
-    # Calendar tab reads these directly so both tabs always show the same
-    # window — Sessions is the source of truth here, Calendar has no
-    # independent date picker of its own.
-    st.session_state["shared_from"] = date_from
-    st.session_state["shared_to"] = date_to
+    # The old Calendar tab used to read shared_from/shared_to from here — it's
+    # been replaced by the single-day wizard, which has its own day picker,
+    # so this cross-tab state hookup is gone.
 
-    # Runs automatically whenever the date range is known — no admin action
-    # needed. Cached for 10 minutes per range so repeated page loads/reruns
-    # don't redo the full allocation; the underlying write is idempotent
-    # either way, so this is purely a "don't do it more than necessary" cache.
-    mi_run = db.ensure_mock_interviews_assigned(date_from, date_to, cap_per_week=3)
-    if role in ("admin", "extended_ae"):
-        st.caption(
-            f"🎯 Mock Interview auto-assign for {date_from} → {date_to}: "
-            f"{mi_run['candidates']} candidate session(s) found system-wide, "
-            f"{mi_run['assigned']} newly assigned this run "
-            f"(0 is expected if everyone eligible is already at cap or "
-            f"there's simply nothing free left in this range)."
-        )
+    # Auto-assignment has been REMOVED. Mock Interviews are now purely a
+    # manual pick — see the Mock Interview tab, which reads the nationwide
+    # candidate pool via db.get_all_mock_interview_sessions() and lets the
+    # person choose, with no session ever assigned on their behalf.
 
 
     if pick_trainer != "All trainers":
