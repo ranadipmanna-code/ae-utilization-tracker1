@@ -682,27 +682,19 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
         "split between two people."
     )
 
-    # Own date range. This used to read st.session_state['shared_from'], which
-    # the Sessions tab only sets AFTER four possible early returns -- so if a
-    # Core AE had no faculty mapped, or no sessions in range, this tab was
-    # permanently stuck on "open the Sessions tab first".
+    # Fixed rolling 7-day window (today .. today+6), nationwide, no
+    # user-editable range anymore — this tab now IS the single Mock
+    # Interview entry point (old "My Mock Interviews" + old MI Pool are both
+    # folded in here).
     today = date.today()
-    d1, d2, d3 = st.columns(3)
-    with d1:
-        date_from = st.date_input("From", value=today, key="mi_from")
-    with d2:
-        date_to = st.date_input("To", value=today + timedelta(days=13), key="mi_to")
-    if date_to < date_from:
-        st.warning("‘To’ is before ‘From’ — widen the range.")
-        return
+    date_from = today
+    date_to = today + timedelta(days=6)
+    st.caption(f"Showing {date_from} → {date_to} (next 7 days), all trainers nationwide.")
 
-    # Make sure allocation has actually run for this window. Without this the
-    # pool read straight from an empty assignment table and every row showed
-    # "Extended AE / Open / —", which looked like the allocator was broken.
-    try:
-        db.ensure_mock_interviews_assigned(date_from, date_to, cap_per_week=3)
-    except Exception as exc:
-        st.warning(f"Auto-assignment did not run: {exc}")
+    # Auto-assignment has been REMOVED. The pool below is built directly from
+    # the nationwide CMIS candidate list plus whatever manual claims already
+    # exist in mock_interview_assignment / mi_pool_claim — nothing here
+    # writes an assignment on anyone's behalf.
 
     with st.spinner("Building the Mock Interview pool…"):
         pool = build_pool(date_from, date_to)
