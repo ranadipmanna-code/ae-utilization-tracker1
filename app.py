@@ -1232,8 +1232,13 @@ def _calendar_wizard_tab(user, role):
     A slot counts as TRAINING only when its CMIS-derived default is
     'teaching' -- everything else (including times with no CMIS row for this
     member at all) is free time, available for evaluation/MI picking.
+
+    Contiguous 30-min CMIS rows (same trainer/date/batch, back-to-back) are
+    merged into one row per real class -- same _merge_consecutive() the
+    Evaluations tab uses -- so this looks and behaves like the rest of the
+    app rather than showing raw 30-min slivers.
     """
-    st.markdown("### 📅 Calendar")
+    st.markdown("### \U0001F4C5 Calendar")
     email = user["email"]
 
     w_lo, w_hi = db.visible_window()
@@ -1242,28 +1247,30 @@ def _calendar_wizard_tab(user, role):
         key="cal_wizard_day",
     )
 
-    with st.spinner("Loading this day's schedule…"):
+    with st.spinner("Loading this day's schedule\u2026"):
         own_cal = db.resolve_member_calendar(email, picked_day, picked_day)
         all_day = db.fetch_sessions_all(picked_day, picked_day, limit=5000)
+    if not all_day.empty:
+        all_day = all_day.copy()
+        all_day["_date"] = pd.to_datetime(all_day["s_date"]).dt.date
 
-    # ---- Step 1: Training -- fixed, no choice offered -----------------
-    st.markdown("#### 🏫 Training (fixed)")
+    # ---- Step 1: Training -- fixed, no choice offered, merged for display
+    st.markdown("#### \U0001F3EB Training (fixed)")
     training = pd.DataFrame()
     if not own_cal.empty:
         training = own_cal[own_cal["default_task"] == "teaching"].copy()
+    training_slot_times = set(training["slot_time"]) if not training.empty else set()
     if training.empty:
         st.caption("No teaching slots on this day.")
-        training_slot_times = set()
     else:
-        training = training.sort_values("slot_time")
-        for _, r in training.iterrows():
+        training_display = _merge_consecutive(training)
+        for _, r in training_display.sort_values("slot_time").iterrows():
             bits = [str(r["slot_time"])]
             if r.get("c_alias"):
                 bits.append(str(r["c_alias"]))
             if r.get("batch_code"):
                 bits.append(str(r["batch_code"]))
-            st.markdown(f"- **{bits[0]}**  ·  " + "  ·  ".join(bits[1:]))
-        training_slot_times = set(training["slot_time"])
+            st.markdown(f"- **{bits[0]}**  \u00b7  " + "  \u00b7  ".join(bits[1:]))
 
     # ---- Build the day's full slot grid (system-wide + own CMIS rows) --
     day_grid: set = set()
@@ -1274,11 +1281,11 @@ def _calendar_wizard_tab(user, role):
     free_slots = day_grid - training_slot_times
 
     if not free_slots:
-        st.info("No free time on this day — fully booked with training.")
+        st.info("No free time on this day \u2014 fully booked with training.")
         return
 
-    # ---- Step 2: Evaluation -- pick ONE session in the free time ------
-    st.markdown("#### 📝 Evaluation")
+    # ---- Step 2: Evaluation -- pick ONE (merged) session in free time ----
+    st.markdown("#### \U0001F4DD Evaluation")
     eval_candidates = pd.DataFrame()
     if not all_day.empty:
         eval_candidates = all_day[
@@ -1289,26 +1296,49 @@ def _calendar_wizard_tab(user, role):
     if eval_candidates.empty:
         st.caption("No sessions available to evaluate in the free time on this day.")
     else:
-        eval_candidates["_label"] = (
-            eval_candidates["slot_time"].astype(str) + "  ·  "
-            + (eval_candidates["f_name"].fillna("") + " " + eval_candidates["l_name"].fillna("")).str.strip()
-            + "  ·  " + eval_candidates["c_alias"].fillna("").astype(str)
-            + "  ·  " + eval_candidates["batch_code"].fillna("").astype(str)
+        eval_display = _merge_consecutive(eval_candidates)
+        eval_display["_label"] = (
+            eval_display["slot_time"].astype(str) + "  \u00b7  "
+            + (eval_display["f_name"].fillna("") + " " + eval_display["l_name"].fillna("")).str.strip()
+            + "  \u00b7  " + eval_display["c_alias"].fillna("").astype(str)
+            + "  \u00b7  " + eval_display["batch_code"].fillna("").astype(str)
         )
-        options = ["— none —"] + eval_candidates["_label"].tolist()
+        options = ["\u2014 none \u2014"] + eval_display["_label"].tolist()
         pick = st.selectbox("Session to observe", options, key="cal_wizard_eval_pick")
-        if pick != "— none —":
-            row = eval_candidates[eval_candidates["_label"] == pick].iloc[0]
-            if st.button("💾 Save evaluation pick", key="cal_wizard_eval_save"):
-                db.upsert_selection_for_role(
-                    role, email,
-                    pd.to_datetime(row["s_date"]).date(),
-                    row["slot_time"],
-                    module=row.get("c_alias"),
-                    batch_code=row.get("batch_code"),
-                    status="Selected",
-                )
-                st.success("Saved. Refreshing remaining free time…")
+        if pick != "\u2014 none \u2014":
+            row = eval_display[eval_display["_label"] == pick].iloc[0]
+            if st.button("\U0001F4BE Save evaluation pick", key="cal_wizard_eval_save"):
+                # A merged class fans the write out across EVERY 30-min slot
+                # it spans -- identical to how the Evaluations tab saves a
+                # merged pick -- so the DB stays correct even though the
+                # wizard showed one combined row.
+                members = row.get("_members")
+                if not isinstance(members, (list, tuple)) or not members:
+                    members = [row["slot_time"]]
+                core_ae_email = (
+                    db.core_ae_for_extended(email) if role == "extended_ae" else email
+                ) or email
+                sel_id = None
+                for m_slot in members:
+                    sel_id = db.upsert_selection_for_role(
+                        role, email, row["_date"], m_slot,
+                        row.get("m_code"), row.get("batch_code"), "Selected",
+                    )
+                    try:
+                        db.set_highlight_flag(
+                            row["_date"], m_slot, row.get("batch_code"),
+                            core_ae_email, email, True,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        db.sync_slot_task_from_evaluation(
+                            email, role, row["_date"], m_slot, True, sel_id,
+                        )
+                    except Exception:
+                        pass
+                db.clear_app_caches()
+                st.success("Saved. Refreshing remaining free time\u2026")
                 st.rerun()
 
     # ---- Recompute free time AFTER any evaluation already claimed today -
@@ -1324,35 +1354,41 @@ def _calendar_wizard_tab(user, role):
     # ---- Step 3: Mock Interview -- only in whatever free time is left --
     mi_candidates = db.get_all_mock_interview_sessions(picked_day, picked_day)
     if not mi_candidates.empty:
-        mi_candidates = mi_candidates[mi_candidates["slot_time"].isin(remaining_free)]
+        mi_candidates = mi_candidates[mi_candidates["slot_time"].isin(remaining_free)].copy()
+        mi_candidates["_date"] = pd.to_datetime(mi_candidates["s_date"]).dt.date
     if mi_candidates.empty:
         return  # no MI session in the remaining free time -- show nothing
 
-    st.markdown("#### 🎯 Mock Interview")
-    mi_candidates = mi_candidates.copy()
-    mi_candidates["_label"] = (
-        mi_candidates["slot_time"].astype(str) + "  ·  "
-        + (mi_candidates["f_name"].fillna("") + " " + mi_candidates["l_name"].fillna("")).str.strip()
-        + "  ·  " + mi_candidates["c_alias"].fillna("").astype(str)
-        + "  ·  " + mi_candidates["batch_code"].fillna("").astype(str)
+    st.markdown("#### \U0001F3AF Mock Interview")
+    mi_display = _merge_consecutive(mi_candidates)
+    mi_display["_label"] = (
+        mi_display["slot_time"].astype(str) + "  \u00b7  "
+        + (mi_display["f_name"].fillna("") + " " + mi_display["l_name"].fillna("")).str.strip()
+        + "  \u00b7  " + mi_display["c_alias"].fillna("").astype(str)
+        + "  \u00b7  " + mi_display["batch_code"].fillna("").astype(str)
     )
-    mi_options = ["— none —"] + mi_candidates["_label"].tolist()
+    mi_options = ["\u2014 none \u2014"] + mi_display["_label"].tolist()
     mi_pick = st.selectbox("Mock Interview session", mi_options, key="cal_wizard_mi_pick")
-    if mi_pick != "— none —":
-        mrow = mi_candidates[mi_candidates["_label"] == mi_pick].iloc[0]
-        if st.button("💾 Save Mock Interview pick", key="cal_wizard_mi_save"):
-            db.upsert_mock_interview_assignment(
-                extended_ae_email=email,
-                session_date=pd.to_datetime(mrow["s_date"]).date(),
-                slot_time=mrow["slot_time"],
-                batch_code=mrow.get("batch_code"),
-                c_alias=mrow.get("c_alias"),
-                trainer_email=mrow.get("email_id"),
-                trainer_name=(str(mrow.get("f_name") or "") + " " + str(mrow.get("l_name") or "")).strip(),
-                program_name=mrow.get("program_name"),
-                status="Selected",
-                source="manual",
-            )
+    if mi_pick != "\u2014 none \u2014":
+        mrow = mi_display[mi_display["_label"] == mi_pick].iloc[0]
+        if st.button("\U0001F4BE Save Mock Interview pick", key="cal_wizard_mi_save"):
+            members = mrow.get("_members")
+            if not isinstance(members, (list, tuple)) or not members:
+                members = [mrow["slot_time"]]
+            for m_slot in members:
+                db.upsert_mock_interview_assignment(
+                    extended_ae_email=email,
+                    session_date=mrow["_date"],
+                    slot_time=m_slot,
+                    batch_code=mrow.get("batch_code"),
+                    c_alias=mrow.get("c_alias"),
+                    trainer_email=mrow.get("email_id"),
+                    trainer_name=(str(mrow.get("f_name") or "") + " " + str(mrow.get("l_name") or "")).strip(),
+                    program_name=mrow.get("program_name"),
+                    status="Selected",
+                    source="manual",
+                )
+            db.clear_app_caches()
             st.success("Saved.")
             st.rerun()
 
