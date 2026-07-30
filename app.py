@@ -1771,8 +1771,31 @@ _UTIL_COLORS = {
 }
 
 
+def _prep_for_merge(df, date_col, email):
+    """Give a frame the columns _merge_consecutive needs (email_id, _date,
+    slot_time, batch_code, time_duration) then collapse back-to-back CMIS
+    slots into one row per real class. Returns a frame with a '_d' date col
+    (one row per genuine class)."""
+    if df is None or df.empty:
+        return pd.DataFrame({"_d": []})
+    d = df.copy()
+    d["email_id"] = email  # every row belongs to this one member
+    d["_date"] = pd.to_datetime(d[date_col]).dt.date
+    if "batch_code" not in d.columns:
+        d["batch_code"] = ""
+    if "slot_time" not in d.columns:
+        # No slot granularity to merge on — count rows as-is.
+        return pd.DataFrame({"_d": d["_date"]})
+    if "time_duration" not in d.columns:
+        d["time_duration"] = 0
+    merged = _merge_consecutive(d)
+    return pd.DataFrame({"_d": pd.to_datetime(merged["_date"]).dt.date})
+
+
 def _member_metric_frames(email, role, d_from, d_to):
-    """For one AE member, return three date-stamped frames:
+    """For one AE member, return three date-stamped frames (one row per
+    GENUINE class after merging back-to-back CMIS slots with the same
+    trainer/batch/date):
         evaluations (claimed session selections),
         mock interviews (claimed MI assignments),
         training (their own CMIS teaching slots).
@@ -1781,9 +1804,7 @@ def _member_metric_frames(email, role, d_from, d_to):
     sel = db.get_selections_for_role(role, email, d_from, d_to)
     if sel is not None and not sel.empty:
         sel = sel[sel["status"].isin(CLAIMED)]
-    ev = pd.DataFrame({"_d": []})
-    if sel is not None and not sel.empty:
-        ev = pd.DataFrame({"_d": pd.to_datetime(sel["session_date"]).dt.date})
+    ev = _prep_for_merge(sel, "session_date", email)
 
     # --- Mock Interviews: only Extended AEs hold MI assignments ------------
     mi = pd.DataFrame({"_d": []})
@@ -1791,16 +1812,14 @@ def _member_metric_frames(email, role, d_from, d_to):
         mi_raw = db.get_mock_interview_assignments(email, d_from, d_to)
         if mi_raw is not None and not mi_raw.empty:
             mi_raw = mi_raw[mi_raw["status"].isin(CLAIMED)]
-            if not mi_raw.empty:
-                mi = pd.DataFrame({"_d": pd.to_datetime(mi_raw["session_date"]).dt.date})
+            mi = _prep_for_merge(mi_raw, "session_date", email)
 
     # --- Training: the member's OWN teaching slots from CMIS ---------------
     tr = pd.DataFrame({"_d": []})
     cal = db.resolve_member_calendar(email, d_from, d_to)
     if cal is not None and not cal.empty:
         teach = cal[cal["task_type"] == "teaching"]
-        if not teach.empty:
-            tr = pd.DataFrame({"_d": pd.to_datetime(teach["_date"]).dt.date})
+        tr = _prep_for_merge(teach, "_date", email)
 
     return ev, mi, tr
 
@@ -1840,66 +1859,186 @@ def _build_utilization_long(members, d_from, d_to, granularity):
 
 
 def _utilization_chart(long_df, granularity):
-    """A unique small-multiples heatmap-style chart: one horizontal band per
-    AE member, coloured cells per period, faceted by metric. Uses Altair
-    (bundled with Streamlit); falls back to a stacked bar chart if Altair
-    isn't importable in this environment."""
+    """Unique, light, full-width visualization:
+      (1) a horizontal stacked bar per member — total activity split by type;
+      (2) a per-period activity heatmap (one column per day/week).
+    Uses Altair (bundled with Streamlit); falls back to st.bar_chart if
+    Altair isn't importable in this environment."""
     if long_df.empty:
         st.info("Nothing to visualize for this window yet.")
         return
 
-    # Human-friendly period labels
     plot = long_df.copy()
     if granularity == "Daily":
         plot["period_label"] = pd.to_datetime(plot["period"]).dt.strftime("%a %d %b")
     else:
-        plot["period_label"] = "Wk " + pd.to_datetime(plot["period"]).dt.strftime("%d %b")
-    plot["_pk"] = plot["period"]  # keep ISO for correct sort
+        plot["period_label"] = "Wk of " + pd.to_datetime(plot["period"]).dt.strftime("%d %b")
+    plot["_pk"] = plot["period"]
+    plot["who"] = plot["name"] + "  ·  " + plot["role"]
 
     try:
         import altair as alt
 
-        # A row label that also carries the role, so Core/Extended read apart.
-        plot["who"] = plot["name"] + "  ·  " + plot["role"]
+        color_scale = alt.Scale(
+            domain=_UTIL_METRICS,
+            range=[_UTIL_COLORS[m] for m in _UTIL_METRICS],
+        )
 
-        order = [p for p in sorted(plot["_pk"].unique())]
+        # ---- (1) Stacked horizontal bars: total per member by activity ----
+        totals_by_member = (
+            plot.groupby(["who", "name", "role", "metric"])["count"].sum()
+            .reset_index()
+        )
+        member_order = (
+            totals_by_member.groupby("who")["count"].sum()
+            .sort_values(ascending=False).index.tolist()
+        )
+        bars = (
+            alt.Chart(totals_by_member)
+            .mark_bar(cornerRadiusEnd=4, height={"band": 0.7})
+            .encode(
+                y=alt.Y("who:N", title=None, sort=member_order,
+                        axis=alt.Axis(labelLimit=260, labelFontSize=12)),
+                x=alt.X("count:Q", title="Sessions",
+                        axis=alt.Axis(grid=True, gridColor="#eef1f4")),
+                color=alt.Color("metric:N", title="Activity", scale=color_scale,
+                                legend=alt.Legend(orient="top", direction="horizontal")),
+                order=alt.Order("metric:N", sort="ascending"),
+                tooltip=[
+                    alt.Tooltip("name:N", title="Member"),
+                    alt.Tooltip("role:N", title="Role"),
+                    alt.Tooltip("metric:N", title="Activity"),
+                    alt.Tooltip("count:Q", title="Sessions"),
+                ],
+            )
+            .properties(height=max(220, 30 * len(member_order)),
+                        background="transparent")
+            .configure_view(strokeWidth=0)
+            .configure_axis(labelColor="#16283c", titleColor="#5d7085")
+        )
+        st.altair_chart(bars, use_container_width=True)
+
+        # ---- (2) Per-period heatmap (only the active metrics) -------------
+        label = "day" if granularity == "Daily" else "week"
+        st.caption(f"Activity by {label} — deeper shade = more sessions")
+
+        order = sorted(plot["_pk"].unique())
         label_map = dict(zip(plot["_pk"], plot["period_label"]))
         order_labels = [label_map[p] for p in order]
 
-        base = alt.Chart(plot).encode(
+        # Keep only metrics that actually have activity, so empty facets don't
+        # waste space / read as blank.
+        active_metrics = [m for m in _UTIL_METRICS
+                          if plot.loc[plot["metric"] == m, "count"].sum() > 0]
+        heat_src = plot[plot["metric"].isin(active_metrics)] if active_metrics else plot
+
+        base = alt.Chart(heat_src).encode(
             x=alt.X("period_label:N", title=None, sort=order_labels,
-                    axis=alt.Axis(labelAngle=-40)),
-            y=alt.Y("who:N", title=None,
-                    sort=alt.SortField(field="who", order="ascending")),
+                    axis=alt.Axis(labelAngle=-40, labelFontSize=11)),
+            y=alt.Y("who:N", title=None, sort=member_order,
+                    axis=alt.Axis(labelLimit=260, labelFontSize=11)),
         )
         heat = base.mark_rect(stroke="#ffffff", strokeWidth=2, cornerRadius=3).encode(
-            color=alt.Color("count:Q", title="Count",
+            color=alt.Color("count:Q", title="Sessions",
                             scale=alt.Scale(scheme="teals")),
             tooltip=[
                 alt.Tooltip("name:N", title="Member"),
-                alt.Tooltip("role:N", title="Role"),
                 alt.Tooltip("metric:N", title="Activity"),
                 alt.Tooltip("period_label:N", title="Period"),
-                alt.Tooltip("count:Q", title="Count"),
+                alt.Tooltip("count:Q", title="Sessions"),
             ],
         )
-        text = base.mark_text(baseline="middle", fontSize=11, fontWeight="bold").encode(
-            text=alt.Text("count:Q"),
-            color=alt.condition("datum.count > 3",
-                                alt.value("white"), alt.value("#16283c")),
+        txt = base.mark_text(baseline="middle", fontSize=10, fontWeight="bold").encode(
+            text=alt.condition("datum.count > 0", alt.Text("count:Q"), alt.value("")),
+            color=alt.condition("datum.count > 8", alt.value("white"), alt.value("#16283c")),
         )
-        chart = (heat + text).properties(height=alt.Step(26)).facet(
-            column=alt.Column("metric:N", title=None,
-                              sort=_UTIL_METRICS,
-                              header=alt.Header(labelFontSize=13,
-                                                labelFontWeight="bold")),
-        ).resolve_scale(x="independent")
-        st.altair_chart(chart, use_container_width=True)
+        heat_chart = (
+            (heat + txt)
+            .properties(height=max(220, 26 * len(member_order)),
+                        background="transparent")
+            .facet(column=alt.Column("metric:N", title=None, sort=_UTIL_METRICS,
+                                     header=alt.Header(labelFontSize=13,
+                                                       labelFontWeight="bold",
+                                                       labelColor="#16283c")))
+            .resolve_scale(x="independent")
+            .configure_view(strokeWidth=0)
+        )
+        st.altair_chart(heat_chart, use_container_width=True)
     except Exception:
-        # Fallback: stacked bars of total activity per member.
         wide = (long_df.groupby(["name", "metric"])["count"].sum()
                 .unstack(fill_value=0).reindex(columns=_UTIL_METRICS, fill_value=0))
         st.bar_chart(wide, color=[_UTIL_COLORS[m] for m in _UTIL_METRICS])
+
+
+def _render_utilization_table(totals):
+    """Full-width, light, brand-themed HTML table grouped by role.
+    Replaces st.dataframe (which rendered dark/dull) with a clean card table
+    that fills the container and colour-codes the three activity columns."""
+    metric_bg = {
+        "Evaluation":     "#e6faf6",  # soft teal
+        "Training":       "#e7f2fb",  # soft blue
+        "Mock Interview": "#fdefe2",  # soft orange
+    }
+    metric_ink = {
+        "Evaluation":     "#0f766e",
+        "Training":       "#1b5f96",
+        "Mock Interview": "#ad4f0f",
+    }
+
+    def _num(v, bg, ink):
+        v = int(v)
+        strong = "font-weight:700;" if v > 0 else "opacity:.45;font-weight:500;"
+        return (f"<td style='text-align:right;padding:10px 18px;"
+                f"background:{bg};color:{ink};{strong}"
+                f"border-bottom:1px solid #eef1f4;'>{v}</td>")
+
+    rows_html = []
+    ordered = totals.sort_values(["Role", "Member"], ascending=[True, True])
+    current_role = None
+    for _, r in ordered.iterrows():
+        if r["Role"] != current_role:
+            current_role = r["Role"]
+            rows_html.append(
+                f"<tr><td colspan='6' style='padding:12px 18px 6px;"
+                f"font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;"
+                f"color:#14b8a6;font-weight:800;background:#ffffff;"
+                f"border-bottom:2px solid #14b8a6;'>{r['Role']}</td></tr>"
+            )
+        rows_html.append(
+            "<tr>"
+            f"<td style='padding:10px 18px;color:#16283c;font-weight:600;"
+            f"border-bottom:1px solid #eef1f4;'>{r['Member']}</td>"
+            f"<td style='padding:10px 18px;color:#5d7085;font-size:.85rem;"
+            f"border-bottom:1px solid #eef1f4;'>{r['Role']}</td>"
+            + _num(r["Evaluation"], metric_bg["Evaluation"], metric_ink["Evaluation"])
+            + _num(r["Training"], metric_bg["Training"], metric_ink["Training"])
+            + _num(r["Mock Interview"], metric_bg["Mock Interview"], metric_ink["Mock Interview"])
+            + f"<td style='text-align:right;padding:10px 18px;color:#16283c;"
+              f"font-weight:800;background:#f7f9fb;border-bottom:1px solid #eef1f4;'>"
+              f"{int(r['Total'])}</td>"
+            "</tr>"
+        )
+
+    head = (
+        "<tr>"
+        "<th style='text-align:left;padding:12px 18px;color:#ffffff;'>Member</th>"
+        "<th style='text-align:left;padding:12px 18px;color:#ffffff;'>Role</th>"
+        "<th style='text-align:right;padding:12px 18px;color:#ffffff;'>Evaluation</th>"
+        "<th style='text-align:right;padding:12px 18px;color:#ffffff;'>Training</th>"
+        "<th style='text-align:right;padding:12px 18px;color:#ffffff;'>Mock Interview</th>"
+        "<th style='text-align:right;padding:12px 18px;color:#ffffff;'>Total</th>"
+        "</tr>"
+    )
+    table = (
+        "<div style='width:100%;overflow-x:auto;border:1px solid #e3e7ec;"
+        "border-radius:14px;box-shadow:0 1px 3px rgba(22,40,60,.06);'>"
+        "<table style='width:100%;border-collapse:collapse;font-size:.95rem;"
+        "background:#ffffff;'>"
+        f"<thead style='background:#16283c;'>{head}</thead>"
+        f"<tbody>{''.join(rows_html)}</tbody>"
+        "</table></div>"
+    )
+    st.markdown(table, unsafe_allow_html=True)
 
 
 def _admin_utilization_tab(user, role):
@@ -1981,10 +2120,8 @@ def _admin_utilization_tab(user, role):
         for m in _UTIL_METRICS:
             totals[m] = totals[m].astype(int)
     totals["Total"] = totals[_UTIL_METRICS].sum(axis=1).astype(int)
-    show = totals.drop(columns=["email"]).sort_values(
-        ["Role", "Member"], ascending=[True, True]
-    )
-    st.dataframe(show, use_container_width=True, hide_index=True)
+
+    _render_utilization_table(totals)
 
     # Quick top-line metrics across the whole selection.
     m1, m2, m3, m4 = st.columns(4)
@@ -1996,11 +2133,10 @@ def _admin_utilization_tab(user, role):
     st.divider()
 
     # ---- UNIQUE VISUALIZATION --------------------------------------------
-    label = "day" if granularity == "Daily" else "week"
-    st.markdown(f"#### 📊 Activity heatmap — per {label}")
+    st.markdown("#### 📊 Activity Breakdown")
     st.caption(
-        "Each row is one AE member; each column a "
-        f"{label}. Deeper teal = more activity. Faceted by activity type."
+        "Total sessions per member by activity type, then the same split "
+        "across each " + ("day" if granularity == "Daily" else "week") + "."
     )
     _utilization_chart(long_df, granularity)
 
