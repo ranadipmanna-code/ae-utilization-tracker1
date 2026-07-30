@@ -1771,110 +1771,109 @@ _UTIL_COLORS = {
 }
 
 
-def _prep_for_merge(df, date_col, email):
-    """Reduce a member's raw CMIS slot rows to ONE row per genuine class.
+def _slot_rows(df, date_col, email, metric, role_label, name):
+    """Normalise one source frame into per-slot detail rows.
 
-    CMIS records a class as several consecutive 30-minute rows that all share
-    the same date and batch_code. So the number of genuine classes on a day is
-    the number of distinct (date, batch_code) blocks — e.g. Aarti's twelve
-    half-hour rows across three batches on one day = 3 classes, not 12.
-
-    This is deliberately based on (date, batch) rather than time-continuity:
-    it can't be fooled by inconsistent slot_time formatting or by CMIS leaving
-    a gap between two halves of the same class. When batch_code is missing we
-    fall back to (date, slot_time) so nothing collapses that shouldn't.
-    Returns a frame with one '_d' date column per genuine class."""
+    We count EACH 30-minute CMIS slot as one session (so Aarti's twelve
+    half-hour rows on a day read as 12, matching CMIS row-for-row). Every row
+    keeps its date, slot time, batch code and trainer so the details table can
+    show exactly which sessions make up the count."""
+    cols = ["name", "email", "role", "metric", "_d", "slot_time",
+            "batch_code", "trainer", "module"]
     if df is None or df.empty:
-        return pd.DataFrame({"_d": []})
+        return pd.DataFrame(columns=cols)
     d = df.copy()
-    d["_date"] = pd.to_datetime(d[date_col]).dt.date
+    d["_d"] = pd.to_datetime(d[date_col]).dt.date
 
-    has_batch = "batch_code" in d.columns and d["batch_code"].notna().any()
-    if has_batch:
-        d["_bc"] = d["batch_code"].fillna("").astype(str).str.strip()
-        # blank batch codes can't be merged safely — keep those per slot_time
-        blank = d["_bc"] == ""
-        key_cols = ["_date", "_bc"]
-        nonblank = d[~blank].drop_duplicates(subset=key_cols)
-        parts = [nonblank[["_date"]]]
-        if blank.any() and "slot_time" in d.columns:
-            b = d[blank].drop_duplicates(subset=["_date", "slot_time"])
-            parts.append(b[["_date"]])
-        elif blank.any():
-            parts.append(d[blank][["_date"]])
-        out = pd.concat(parts, ignore_index=True)
-        return pd.DataFrame({"_d": out["_date"].values})
+    def pick(*names, default=""):
+        for n in names:
+            if n in d.columns:
+                return d[n].fillna("").astype(str)
+        return pd.Series([default] * len(d), index=d.index)
 
-    # No batch column: one class per (date, slot_time) at most.
-    if "slot_time" in d.columns:
-        d = d.drop_duplicates(subset=["_date", "slot_time"])
-    return pd.DataFrame({"_d": d["_date"].values})
+    out = pd.DataFrame({
+        "name": name,
+        "email": email,
+        "role": role_label,
+        "metric": metric,
+        "_d": d["_d"].values,
+        "slot_time": pick("slot_time").values,
+        "batch_code": pick("batch_code").values,
+        "trainer": pick("trainer_name", "trainer", "module").values,
+        "module": pick("module", "c_alias", "program_name").values,
+    })
+    return out
 
 
-def _member_metric_frames(email, role, d_from, d_to):
-    """For one AE member, return three date-stamped frames (one row per
-    GENUINE class after merging back-to-back CMIS slots with the same
-    trainer/batch/date):
-        evaluations (claimed session selections),
-        mock interviews (claimed MI assignments),
-        training (their own CMIS teaching slots).
-    Each frame is reduced to a single date column named '_d'."""
+def _member_metric_frames(email, role, d_from, d_to, name="", role_label=""):
+    """Return per-slot detail rows for one member across the three metrics.
+    Each 30-minute CMIS slot is one row (one session)."""
     # --- Evaluations: claimed rows in this member's own selection table ---
     sel = db.get_selections_for_role(role, email, d_from, d_to)
     if sel is not None and not sel.empty:
         sel = sel[sel["status"].isin(CLAIMED)]
-    ev = _prep_for_merge(sel, "session_date", email)
+    ev = _slot_rows(sel, "session_date", email, "Evaluation", role_label, name)
 
     # --- Mock Interviews: only Extended AEs hold MI assignments ------------
-    mi = pd.DataFrame({"_d": []})
+    mi = pd.DataFrame()
     if role == "extended_ae":
         mi_raw = db.get_mock_interview_assignments(email, d_from, d_to)
         if mi_raw is not None and not mi_raw.empty:
             mi_raw = mi_raw[mi_raw["status"].isin(CLAIMED)]
-            mi = _prep_for_merge(mi_raw, "session_date", email)
+            mi = _slot_rows(mi_raw, "session_date", email, "Mock Interview",
+                            role_label, name)
 
     # --- Training: the member's OWN teaching slots from CMIS ---------------
-    tr = pd.DataFrame({"_d": []})
+    tr = pd.DataFrame()
     cal = db.resolve_member_calendar(email, d_from, d_to)
     if cal is not None and not cal.empty:
         teach = cal[cal["task_type"] == "teaching"]
-        tr = _prep_for_merge(teach, "_date", email)
+        tr = _slot_rows(teach, "_date", email, "Training", role_label, name)
 
     return ev, mi, tr
 
 
 def _build_utilization_long(members, d_from, d_to, granularity):
     """members: list of (email, name, role_key, role_label).
-    Returns a long DataFrame: name, email, role, period, metric, count.
-    period is a day (Daily) or 'Week of <monday>' (Weekly)."""
+    Returns (long_df, detail_df):
+      long_df  -> name, email, role, period, metric, count  (per 30-min slot)
+      detail_df-> every counted slot with date/slot_time/batch/trainer.
+    period is a day (Daily) or the week's Monday (Weekly)."""
     def period_key(dt):
         if granularity == "Daily":
             return dt.isoformat()
         monday = dt - timedelta(days=dt.weekday())
         return monday.isoformat()
 
-    rows = []
+    detail_parts = []
     for email, name, role_key, role_label in members:
-        ev, mi, tr = _member_metric_frames(email, role_key, d_from, d_to)
-        for frame, metric in ((ev, "Evaluation"), (mi, "Mock Interview"), (tr, "Training")):
-            if frame is None or frame.empty:
-                continue
-            for d in frame["_d"]:
-                if d is None or d < d_from or d > d_to:
-                    continue
-                rows.append({
-                    "name": name, "email": email, "role": role_label,
-                    "period": period_key(d), "metric": metric,
-                })
+        ev, mi, tr = _member_metric_frames(
+            email, role_key, d_from, d_to, name=name, role_label=role_label
+        )
+        for frame in (ev, mi, tr):
+            if frame is not None and not frame.empty:
+                detail_parts.append(frame)
 
-    cols = ["name", "email", "role", "period", "metric", "count"]
-    if not rows:
-        return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(rows)
-    return (
-        df.groupby(["name", "email", "role", "period", "metric"])
-          .size().reset_index(name="count")
+    detail_cols = ["name", "email", "role", "metric", "_d", "slot_time",
+                   "batch_code", "trainer", "module"]
+    long_cols = ["name", "email", "role", "period", "metric", "count"]
+    if not detail_parts:
+        return (pd.DataFrame(columns=long_cols),
+                pd.DataFrame(columns=detail_cols))
+
+    detail = pd.concat(detail_parts, ignore_index=True)
+    # keep only rows inside the window (defensive)
+    detail = detail[(detail["_d"] >= d_from) & (detail["_d"] <= d_to)].copy()
+    if detail.empty:
+        return (pd.DataFrame(columns=long_cols),
+                pd.DataFrame(columns=detail_cols))
+
+    detail["period"] = detail["_d"].apply(period_key)
+    long_df = (
+        detail.groupby(["name", "email", "role", "period", "metric"])
+        .size().reset_index(name="count")
     )
+    return long_df, detail
 
 
 def _utilization_chart(long_df, granularity):
@@ -1989,27 +1988,49 @@ def _utilization_chart(long_df, granularity):
         st.bar_chart(wide, color=[_UTIL_COLORS[m] for m in _UTIL_METRICS])
 
 
+def _util_scrollbar_css():
+    """Inject once: a visible, teal-tinted scrollbar for the wide tables in
+    this tab, plus a hard light background so text never renders on dark."""
+    st.markdown(
+        """
+        <style>
+        .util-scroll{width:100%;overflow-x:auto;border:1px solid #e3e7ec;
+            border-radius:14px;box-shadow:0 1px 3px rgba(22,40,60,.06);
+            background:#ffffff;}
+        .util-scroll::-webkit-scrollbar{height:12px;}
+        .util-scroll::-webkit-scrollbar-track{background:#eef2f5;
+            border-radius:8px;}
+        .util-scroll::-webkit-scrollbar-thumb{background:#14b8a6;
+            border-radius:8px;border:2px solid #eef2f5;}
+        .util-scroll::-webkit-scrollbar-thumb:hover{background:#0d9488;}
+        .util-scroll{scrollbar-color:#14b8a6 #eef2f5;scrollbar-width:thin;}
+        .util-tbl{width:100%;border-collapse:collapse;font-size:.95rem;
+            background:#ffffff;color:#16283c;}
+        .util-tbl th{color:#ffffff;background:#16283c;padding:12px 18px;
+            white-space:nowrap;}
+        .util-tbl td{background:#ffffff;color:#16283c;
+            border-bottom:1px solid #eef1f4;padding:10px 18px;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_utilization_table(totals):
-    """Full-width, light, brand-themed HTML table grouped by role.
-    Replaces st.dataframe (which rendered dark/dull) with a clean card table
-    that fills the container and colour-codes the three activity columns."""
-    metric_bg = {
-        "Evaluation":     "#e6faf6",  # soft teal
-        "Training":       "#e7f2fb",  # soft blue
-        "Mock Interview": "#fdefe2",  # soft orange
-    }
-    metric_ink = {
-        "Evaluation":     "#0f766e",
-        "Training":       "#1b5f96",
-        "Mock Interview": "#ad4f0f",
-    }
+    """Full-width, light, brand-themed HTML table grouped by role. Every cell
+    carries an explicit light background + dark ink so it stays readable in
+    BOTH the light and dark app themes (the old st.dataframe went black)."""
+    _util_scrollbar_css()
+    metric_bg = {"Evaluation": "#e6faf6", "Training": "#e7f2fb",
+                 "Mock Interview": "#fdefe2"}
+    metric_ink = {"Evaluation": "#0f766e", "Training": "#1b5f96",
+                  "Mock Interview": "#ad4f0f"}
 
     def _num(v, bg, ink):
         v = int(v)
-        strong = "font-weight:700;" if v > 0 else "opacity:.45;font-weight:500;"
-        return (f"<td style='text-align:right;padding:10px 18px;"
-                f"background:{bg};color:{ink};{strong}"
-                f"border-bottom:1px solid #eef1f4;'>{v}</td>")
+        strong = "font-weight:700;" if v > 0 else "opacity:.5;font-weight:500;"
+        return (f"<td style='text-align:right;background:{bg} !important;"
+                f"color:{ink} !important;{strong}'>{v}</td>")
 
     rows_html = []
     ordered = totals.sort_values(["Role", "Member"], ascending=[True, True])
@@ -2018,46 +2039,109 @@ def _render_utilization_table(totals):
         if r["Role"] != current_role:
             current_role = r["Role"]
             rows_html.append(
-                f"<tr><td colspan='6' style='padding:12px 18px 6px;"
-                f"font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;"
-                f"color:#14b8a6;font-weight:800;background:#ffffff;"
+                f"<tr><td colspan='6' style='background:#f2fbf9 !important;"
+                f"color:#0d9488 !important;font-size:.78rem;letter-spacing:.06em;"
+                f"text-transform:uppercase;font-weight:800;"
                 f"border-bottom:2px solid #14b8a6;'>{r['Role']}</td></tr>"
             )
         rows_html.append(
             "<tr>"
-            f"<td style='padding:10px 18px;color:#16283c;font-weight:600;"
-            f"border-bottom:1px solid #eef1f4;'>{r['Member']}</td>"
-            f"<td style='padding:10px 18px;color:#5d7085;font-size:.85rem;"
-            f"border-bottom:1px solid #eef1f4;'>{r['Role']}</td>"
+            f"<td style='color:#16283c !important;font-weight:600;'>{r['Member']}</td>"
+            f"<td style='color:#5d7085 !important;font-size:.85rem;'>{r['Role']}</td>"
             + _num(r["Evaluation"], metric_bg["Evaluation"], metric_ink["Evaluation"])
             + _num(r["Training"], metric_bg["Training"], metric_ink["Training"])
             + _num(r["Mock Interview"], metric_bg["Mock Interview"], metric_ink["Mock Interview"])
-            + f"<td style='text-align:right;padding:10px 18px;color:#16283c;"
-              f"font-weight:800;background:#f7f9fb;border-bottom:1px solid #eef1f4;'>"
-              f"{int(r['Total'])}</td>"
+            + f"<td style='text-align:right;background:#f7f9fb !important;"
+              f"color:#16283c !important;font-weight:800;'>{int(r['Total'])}</td>"
             "</tr>"
         )
 
     head = (
         "<tr>"
-        "<th style='text-align:left;padding:12px 18px;color:#ffffff;'>Member</th>"
-        "<th style='text-align:left;padding:12px 18px;color:#ffffff;'>Role</th>"
-        "<th style='text-align:right;padding:12px 18px;color:#ffffff;'>Evaluation</th>"
-        "<th style='text-align:right;padding:12px 18px;color:#ffffff;'>Training</th>"
-        "<th style='text-align:right;padding:12px 18px;color:#ffffff;'>Mock Interview</th>"
-        "<th style='text-align:right;padding:12px 18px;color:#ffffff;'>Total</th>"
+        "<th style='text-align:left;'>Member</th>"
+        "<th style='text-align:left;'>Role</th>"
+        "<th style='text-align:right;'>Evaluation</th>"
+        "<th style='text-align:right;'>Training</th>"
+        "<th style='text-align:right;'>Mock Interview</th>"
+        "<th style='text-align:right;'>Total</th>"
         "</tr>"
     )
     table = (
-        "<div style='width:100%;overflow-x:auto;border:1px solid #e3e7ec;"
-        "border-radius:14px;box-shadow:0 1px 3px rgba(22,40,60,.06);'>"
-        "<table style='width:100%;border-collapse:collapse;font-size:.95rem;"
-        "background:#ffffff;'>"
-        f"<thead style='background:#16283c;'>{head}</thead>"
+        "<div class='util-scroll'>"
+        "<table class='util-tbl'>"
+        f"<thead>{head}</thead>"
         f"<tbody>{''.join(rows_html)}</tbody>"
         "</table></div>"
     )
     st.markdown(table, unsafe_allow_html=True)
+
+
+def _render_session_details(detail_df):
+    """Full session-level breakdown: every counted 30-min slot with its date,
+    time, batch code, trainer, module and which member/activity it belongs to.
+    Rendered as a light, scrollable, brand-themed HTML table."""
+    if detail_df is None or detail_df.empty:
+        st.info("No sessions in this window.")
+        return
+
+    _util_scrollbar_css()
+    metric_chip = {
+        "Evaluation":     ("#e6faf6", "#0f766e"),
+        "Training":       ("#e7f2fb", "#1b5f96"),
+        "Mock Interview": ("#fdefe2", "#ad4f0f"),
+    }
+
+    d = detail_df.copy()
+    d["_d"] = pd.to_datetime(d["_d"]).dt.date
+    d = d.sort_values(["_d", "name", "metric", "slot_time"])
+
+    def _chip(m):
+        bg, ink = metric_chip.get(m, ("#eef1f4", "#16283c"))
+        return (f"<span style='background:{bg};color:{ink};padding:2px 10px;"
+                f"border-radius:999px;font-size:.8rem;font-weight:700;"
+                f"white-space:nowrap;'>{m}</span>")
+
+    rows = []
+    for _, r in d.iterrows():
+        batch = r["batch_code"] or "—"
+        trainer = r["trainer"] or "—"
+        module = r["module"] or "—"
+        slot = r["slot_time"] or "—"
+        rows.append(
+            "<tr>"
+            f"<td style='color:#16283c !important;white-space:nowrap;'>{r['_d']}</td>"
+            f"<td style='color:#16283c !important;font-weight:600;'>{r['name']}</td>"
+            f"<td style='color:#5d7085 !important;font-size:.85rem;'>{r['role']}</td>"
+            f"<td>{_chip(r['metric'])}</td>"
+            f"<td style='color:#16283c !important;white-space:nowrap;'>{slot}</td>"
+            f"<td style='color:#16283c !important;font-weight:600;"
+            f"white-space:nowrap;'>{batch}</td>"
+            f"<td style='color:#16283c !important;'>{trainer}</td>"
+            f"<td style='color:#5d7085 !important;'>{module}</td>"
+            "</tr>"
+        )
+
+    head = (
+        "<tr>"
+        "<th style='text-align:left;'>Date</th>"
+        "<th style='text-align:left;'>Member</th>"
+        "<th style='text-align:left;'>Role</th>"
+        "<th style='text-align:left;'>Activity</th>"
+        "<th style='text-align:left;'>Slot (30 min)</th>"
+        "<th style='text-align:left;'>Batch Code</th>"
+        "<th style='text-align:left;'>Trainer</th>"
+        "<th style='text-align:left;'>Module</th>"
+        "</tr>"
+    )
+    table = (
+        "<div class='util-scroll' style='max-height:520px;overflow-y:auto;'>"
+        "<table class='util-tbl'>"
+        f"<thead style='position:sticky;top:0;'>{head}</thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table></div>"
+    )
+    st.markdown(table, unsafe_allow_html=True)
+    st.caption(f"{len(d)} sessions · each row is one 30-minute CMIS slot.")
 
 
 def _admin_utilization_tab(user, role):
@@ -2129,10 +2213,12 @@ def _admin_utilization_tab(user, role):
         return
 
     with st.spinner("Tallying utilization…"):
-        long_df = _build_utilization_long(members, d_from, d_to, granularity)
+        long_df, detail_df = _build_utilization_long(
+            members, d_from, d_to, granularity
+        )
 
     # ---- INFORMATION TABLE: one row per member, count columns ------------
-    st.markdown("#### 📋 Count Summary")
+    st.markdown("#### 📋 Count Summary — sessions (30 min each)")
     base = pd.DataFrame(
         [(nm(e), r_lbl, e) for (e, _n, _rk, r_lbl) in members],
         columns=["Member", "Role", "email"],
@@ -2154,6 +2240,7 @@ def _admin_utilization_tab(user, role):
     totals["Total"] = totals[_UTIL_METRICS].sum(axis=1).astype(int)
 
     _render_utilization_table(totals)
+    st.caption("Each session = one 30-minute CMIS slot.")
 
     # Quick top-line metrics across the whole selection.
     m1, m2, m3, m4 = st.columns(4)
@@ -2161,6 +2248,12 @@ def _admin_utilization_tab(user, role):
     m2.metric("Training", int(totals["Training"].sum()))
     m3.metric("Mock Interviews", int(totals["Mock Interview"].sum()))
     m4.metric("Members", len(members))
+
+    st.divider()
+
+    # ---- SESSION DETAILS: batch code + trainer + slot time ---------------
+    st.markdown("#### 🗂️ Session Details — batch, trainer & timing")
+    _render_session_details(detail_df)
 
     st.divider()
 
