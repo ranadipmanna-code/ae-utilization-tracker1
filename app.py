@@ -1772,24 +1772,43 @@ _UTIL_COLORS = {
 
 
 def _prep_for_merge(df, date_col, email):
-    """Give a frame the columns _merge_consecutive needs (email_id, _date,
-    slot_time, batch_code, time_duration) then collapse back-to-back CMIS
-    slots into one row per real class. Returns a frame with a '_d' date col
-    (one row per genuine class)."""
+    """Reduce a member's raw CMIS slot rows to ONE row per genuine class.
+
+    CMIS records a class as several consecutive 30-minute rows that all share
+    the same date and batch_code. So the number of genuine classes on a day is
+    the number of distinct (date, batch_code) blocks — e.g. Aarti's twelve
+    half-hour rows across three batches on one day = 3 classes, not 12.
+
+    This is deliberately based on (date, batch) rather than time-continuity:
+    it can't be fooled by inconsistent slot_time formatting or by CMIS leaving
+    a gap between two halves of the same class. When batch_code is missing we
+    fall back to (date, slot_time) so nothing collapses that shouldn't.
+    Returns a frame with one '_d' date column per genuine class."""
     if df is None or df.empty:
         return pd.DataFrame({"_d": []})
     d = df.copy()
-    d["email_id"] = email  # every row belongs to this one member
     d["_date"] = pd.to_datetime(d[date_col]).dt.date
-    if "batch_code" not in d.columns:
-        d["batch_code"] = ""
-    if "slot_time" not in d.columns:
-        # No slot granularity to merge on — count rows as-is.
-        return pd.DataFrame({"_d": d["_date"]})
-    if "time_duration" not in d.columns:
-        d["time_duration"] = 0
-    merged = _merge_consecutive(d)
-    return pd.DataFrame({"_d": pd.to_datetime(merged["_date"]).dt.date})
+
+    has_batch = "batch_code" in d.columns and d["batch_code"].notna().any()
+    if has_batch:
+        d["_bc"] = d["batch_code"].fillna("").astype(str).str.strip()
+        # blank batch codes can't be merged safely — keep those per slot_time
+        blank = d["_bc"] == ""
+        key_cols = ["_date", "_bc"]
+        nonblank = d[~blank].drop_duplicates(subset=key_cols)
+        parts = [nonblank[["_date"]]]
+        if blank.any() and "slot_time" in d.columns:
+            b = d[blank].drop_duplicates(subset=["_date", "slot_time"])
+            parts.append(b[["_date"]])
+        elif blank.any():
+            parts.append(d[blank][["_date"]])
+        out = pd.concat(parts, ignore_index=True)
+        return pd.DataFrame({"_d": out["_date"].values})
+
+    # No batch column: one class per (date, slot_time) at most.
+    if "slot_time" in d.columns:
+        d = d.drop_duplicates(subset=["_date", "slot_time"])
+    return pd.DataFrame({"_d": d["_date"].values})
 
 
 def _member_metric_frames(email, role, d_from, d_to):
@@ -2065,11 +2084,24 @@ def _admin_utilization_tab(user, role):
             "View", ["Daily", "Weekly"], horizontal=True, key="util_gran",
         )
 
-    # Window: Daily = rolling 7 days; Weekly = a small multi-week horizon so
-    # the weekly buckets have something to aggregate.
-    d_from = date.today()
-    d_to = d_from + timedelta(days=6 if granularity == "Daily" else 27)
-    st.caption(f"Window: {d_from} → {d_to}")
+    # Window:
+    #   Daily  -> a SINGLE chosen day, so the counts line up exactly with what
+    #             CMIS shows for that date (one merged class per batch block).
+    #   Weekly -> the current Mon..Sun week, aggregated per week.
+    w_lo, w_hi = db.visible_window()
+    if granularity == "Daily":
+        picked_day = st.date_input(
+            "Day", value=max(date.today(), w_lo),
+            min_value=w_lo, max_value=w_hi, key="util_day",
+        )
+        d_from = d_to = picked_day
+        st.caption(f"Showing {d_from} (single day — matches CMIS for that date)")
+    else:
+        # current week, clamped into the visible window
+        ws, we = current_week_bounds(0)
+        d_from = max(ws, w_lo)
+        d_to = min(we, w_hi)
+        st.caption(f"Showing week {d_from} → {d_to}")
 
     # ---- Assemble the member roster (Core AE + their Extended AEs) --------
     roles_df = db.get_user_roles()
