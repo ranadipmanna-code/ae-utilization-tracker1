@@ -189,15 +189,30 @@ def _css(t: dict, name: str = "light") -> str:
       }}
       [data-testid="stHeader"] {{ background:transparent !important; }}
       /* Streamlit's own sidebar collapse/expand control -- the pale default
-         is nearly invisible against the page background in either theme. */
+         is nearly invisible against the page background in either theme.
+         Target the button AND every svg/path inside it (newer Streamlit
+         renders the arrow as an svg <path> that uses stroke, not fill), and
+         cover both the old and new test-ids so the arrow always shows. */
       [data-testid="stSidebarCollapsedControl"] button,
-      [data-testid="stSidebarCollapsedControl"] svg {{
+      [data-testid="stSidebarCollapsedControl"] svg,
+      [data-testid="stSidebarCollapsedControl"] svg *,
+      [data-testid="stSidebarCollapseButton"] button,
+      [data-testid="stSidebarCollapseButton"] svg,
+      [data-testid="stSidebarCollapseButton"] svg *,
+      [data-testid="collapsedControl"] svg,
+      [data-testid="collapsedControl"] svg * {{
         color:{t['text']} !important; fill:{t['text']} !important;
+        stroke:{t['text']} !important; opacity:1 !important;
       }}
-      [data-testid="stSidebarCollapsedControl"] button {{
-        background:{t['surface_2']} !important; border:1px solid {t['border']} !important;
+      [data-testid="stSidebarCollapsedControl"] button,
+      [data-testid="stSidebarCollapseButton"] button,
+      [data-testid="collapsedControl"] button {{
+        background:{t['surface']} !important;
+        border:1px solid {t['border']} !important;
       }}
-      [data-testid="stSidebarCollapsedControl"] button:hover {{
+      [data-testid="stSidebarCollapsedControl"] button:hover,
+      [data-testid="stSidebarCollapseButton"] button:hover,
+      [data-testid="collapsedControl"] button:hover {{
         background:{t['chip_bg']} !important;
       }}
       .block-container {{ padding-top:2.2rem; padding-bottom:5rem; max-width:1120px; }}
@@ -992,7 +1007,8 @@ def dashboard():
     # tab is gone too — replaced by the single-day wizard.
     if role == "admin":
         made = st.tabs(["📅  Calendar", "📝  Evaluations", "🎯  Mock Interview",
-                        "👥  My Extended AE Team"])
+                        "👥  My Extended AE Team",
+                        "📊  Weekly Summary", "🔗  Email Health"])
         with made[0]:
             _admin_utilization_tab(user, role)
         with made[1]:
@@ -1001,6 +1017,10 @@ def dashboard():
             mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
             _rollup_tab(user, role)
+        with made[4]:
+            _summary_tab(user, role)
+        with made[5]:
+            _email_health_tab()
     elif role == "core_ae":
         made = st.tabs(["📅  Calendar", "📝  Evaluations", "🎯  Mock Interview",
                         "👥  My Extended AE Team", "📊  Weekly Summary"])
@@ -1025,6 +1045,52 @@ def dashboard():
             mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
             _my_core_tab(user)
+
+
+def _light_df_table(df, right_align=None):
+    """Render any DataFrame as a LIGHT, readable HTML table (white cells, dark
+    ink, navy header) — a drop-in replacement for st.dataframe, which follows
+    the app theme and goes black in dark mode. Colours are inline per cell so
+    they survive even if injected CSS is stripped. `right_align` is an optional
+    set of column names to right-align (numbers)."""
+    if df is None or len(df) == 0:
+        st.info("Nothing to show.")
+        return
+    right_align = set(right_align or [])
+    cols = list(df.columns)
+
+    td = ("padding:10px 16px;border-bottom:1px solid #eef1f4;"
+          "background:#ffffff;color:#16283c;")
+    th = ("padding:12px 16px;background:#16283c;color:#ffffff;"
+          "white-space:nowrap;font-weight:700;text-align:left;")
+
+    head = "<tr>" + "".join(
+        f"<th style='{th}{'text-align:right;' if c in right_align else ''}'>{c}</th>"
+        for c in cols
+    ) + "</tr>"
+
+    body = []
+    for _, r in df.iterrows():
+        cells = []
+        for c in cols:
+            val = "" if pd.isna(r[c]) else r[c]
+            align = "text-align:right;" if c in right_align else ""
+            cells.append(f"<td style='{td}{align}white-space:nowrap;'>{val}</td>")
+        body.append("<tr>" + "".join(cells) + "</tr>")
+
+    st.markdown(
+        "<style>.lite-scroll{width:100%;overflow:auto;border:1px solid #e3e7ec;"
+        "border-radius:12px;box-shadow:0 1px 3px rgba(22,40,60,.06);background:#fff;}"
+        ".lite-scroll::-webkit-scrollbar{height:12px;width:12px;}"
+        ".lite-scroll::-webkit-scrollbar-track{background:#eef2f5;border-radius:8px;}"
+        ".lite-scroll::-webkit-scrollbar-thumb{background:#14b8a6;border-radius:8px;"
+        "border:2px solid #eef2f5;}"
+        ".lite-scroll{scrollbar-color:#14b8a6 #eef2f5;scrollbar-width:thin;}</style>"
+        "<div class='lite-scroll'><table style='width:100%;border-collapse:collapse;"
+        "font-size:.93rem;background:#ffffff;'>"
+        f"<thead>{head}</thead><tbody>{''.join(body)}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _summary_tab(user, role):
@@ -1061,7 +1127,7 @@ def _summary_tab(user, role):
         "total_sessions": "Available", "sessions_selected": "Selected",
         "sessions_observed": "Observed", "updated_on": "Updated",
     })
-    st.dataframe(view, use_container_width=True, hide_index=True)
+    _light_df_table(view, right_align={"Available", "Selected", "Observed"})
 
 
 def _email_health_tab():
@@ -1104,7 +1170,7 @@ def _email_health_tab():
         "match_method": "Matched by", "match_score": "Score",
         "cmis_slot_count": "CMIS slots",
     }).drop(columns=["matches_cmis"])
-    st.dataframe(view, use_container_width=True, hide_index=True)
+    _light_df_table(view, right_align={"Score", "CMIS slots"})
 
     n_strong = report["match_method"].isin(["normalised_email", "name"]).sum()
     n_fuzzy = (report["match_method"] == "fuzzy").sum()
