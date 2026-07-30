@@ -995,9 +995,9 @@ def dashboard():
                         "👥  My Extended AE Team",
                         "📊  Weekly Summary", "🔗  Email Health"])
         with made[0]:
-            _calendar_wizard_tab(user, role)
-        with made[1]:
             _admin_utilization_tab(user, role)
+        with made[1]:
+            _sessions_tab(user, role)
         with made[2]:
             mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
@@ -1903,11 +1903,11 @@ def _utilization_chart(long_df, granularity):
 
 
 def _admin_utilization_tab(user, role):
-    st.markdown("### 📝 Evaluations · Utilization Overview")
+    st.markdown("### 📅 Calendar · Utilization Overview")
     st.caption(
         "Read-only counts of Evaluations, Training and Mock Interviews carried "
         "by each Core AE and their Extended AE team. No sessions are selected "
-        "or assigned here — switch between a daily and a weekly view below."
+        "here — switch between a daily and a weekly view below."
     )
 
     core_options = _core_options_for(role, user["email"])
