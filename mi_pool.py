@@ -555,11 +555,25 @@ def _faculty_cell(block: dict) -> str:
     return ""
 
 
+def _join_cell(block: dict) -> str:
+    # Only show the link once the interview is actually Selected.
+    st_ = str(block.get("ext_status") or block.get("status") or "")
+    if st_ != "Selected":
+        return "<span class='mi-cell'>—</span>"
+    link = (block.get("class_link") or "").strip()
+    if not link:
+        return "<span class='mi-cell'>—</span>"
+    href = link if link.startswith("http") else f"https://{link}"
+    return (
+        f"<input class='mi-link' type='text' readonly value='{_esc(href)}' "
+        f"onclick='this.select()' title='Click to select, then Ctrl+C'/> "
+        f"<a class='mi-join' href='{_esc(href)}' target='_blank' rel='noopener'>Open</a>"
+    )
 def _sheet_table_html(view: pd.DataFrame, me: str) -> str:
     """The whole pool as one spreadsheet-style table."""
     cols = ["Date", "Day", "Trainer Name", "Batch Code", "Sub Module",
-            "Start Time", "End Time", "Assigned to", "Status", "AE Status",
-            "Taken by Faculty", "Remarks"]
+            "Start Time", "End Time", "Assigned to", "Status", "Meeting Link",
+            "AE Status", "Taken by Faculty", "Remarks"]
     head = "".join(f"<th>{c}</th>" for c in cols)
     rows = []
     for _, r in view.iterrows():
@@ -578,6 +592,7 @@ def _sheet_table_html(view: pd.DataFrame, me: str) -> str:
             f"<td>{_esc(end)}</td>"
             f"<td>{_esc(assigned)}</td>"
             f"<td>{_status_cell(b)}</td>"
+            f"<td>{_join_cell(b)}</td>"
             f"<td>{_ae_status_cell(b)}</td>"
             f"<td>{_faculty_cell(b)}</td>"
             f"<td class='mi-wrap'>{_esc(b.get('remarks'))}</td>"
