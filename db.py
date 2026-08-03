@@ -1084,8 +1084,8 @@ def get_all_mock_interview_sessions(from_date: date, to_date: date) -> pd.DataFr
     alias_list = "','".join(a.lower() for a in MOCK_INTERVIEW_ALIASES)
     sql = text(
         f"""
-        SELECT s_date, c_alias, slot_time, batch_code, email_id, f_name,
-               l_name, program_name, m_code
+       SELECT s_date, c_alias, slot_time, batch_code, email_id, f_name,
+          l_name, program_name, class_link, m_code
         FROM {MIRROR_TABLE}
         WHERE LOWER(c_alias) IN ('{alias_list}')
           AND s_date BETWEEN :a AND :b
