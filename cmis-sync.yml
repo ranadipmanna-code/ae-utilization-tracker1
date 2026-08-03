@@ -1,0 +1,59 @@
+name: CMIS Mirror Sync
+
+# ---------------------------------------------------------------------------
+# Runs sync_cmis_mirror.py every day to refresh cmis_session_mirror
+# (rolling 30-day window: today .. today+29) in Anudip_AE_Team from live CMIS.
+#
+# Triggers:
+#   - schedule : daily at 00:00 UTC  == 05:30 IST
+#   - manual   : "Run workflow" button in the Actions tab (workflow_dispatch)
+#
+# All DB credentials come from GitHub repository Secrets — nothing is hardcoded.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # cron is in UTC. 00:00 UTC = 05:30 AM IST.
+    # To change the run time, convert your IST time to UTC (IST = UTC + 5:30).
+    #   e.g. 06:00 IST -> "30 0 * * *" ; 22:00 IST -> "30 16 * * *"
+    - cron: "0 0 * * *"
+  workflow_dispatch:        # lets you run it on-demand from the Actions tab
+
+# Prevent two syncs from overlapping if a run is slow / a manual run collides
+concurrency:
+  group: cmis-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Minimal deps the sync script actually needs (no streamlit/pyarrow).
+          pip install "sqlalchemy==2.0.43" "pymysql==1.1.1" "cryptography==45.0.5" "pandas==2.3.1"
+
+      - name: Run CMIS -> mirror sync
+        env:
+          CMIS_HOST:      ${{ secrets.CMIS_HOST }}
+          CMIS_PORT:      ${{ secrets.CMIS_PORT }}
+          CMIS_USER:      ${{ secrets.CMIS_USER }}
+          CMIS_PASSWORD:  ${{ secrets.CMIS_PASSWORD }}
+          CMIS_DB:        ${{ secrets.CMIS_DB }}
+          APPDB_HOST:     ${{ secrets.APPDB_HOST }}
+          APPDB_PORT:     ${{ secrets.APPDB_PORT }}
+          APPDB_USER:     ${{ secrets.APPDB_USER }}
+          APPDB_PASSWORD: ${{ secrets.APPDB_PASSWORD }}
+          APPDB_DB:       ${{ secrets.APPDB_DB }}
+        run: python sync_cmis_mirror.py
