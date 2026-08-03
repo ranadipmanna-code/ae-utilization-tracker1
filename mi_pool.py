@@ -933,7 +933,8 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
                             db.upsert_mock_interview_assignment(
                                 pick_ext, b["date"], b["slot_time"], b.get("batch_code"),
                                 b.get("c_alias"), b.get("trainer_email"),
-                                b.get("trainer_name"), b.get("program_name"),
+                               b.get("trainer_name"), b.get("program_name"),
+                                class_link=b.get("class_link"),
                                 status="Selected", source="admin_assign",
                             )
                         acted = True
@@ -1011,7 +1012,8 @@ def render_mi_pool_tab(user: dict, role: str) -> None:
                             db.upsert_mock_interview_assignment(
                                 email, b["date"], b["slot_time"], b.get("batch_code"),
                                 b.get("c_alias"), b.get("trainer_email"),
-                                b.get("trainer_name"), b.get("program_name"),
+                             b.get("trainer_name"), b.get("program_name"),
+                                class_link=b.get("class_link"),
                                 status="Selected", source="pool",
                             )
                         elif action == "core_take":
