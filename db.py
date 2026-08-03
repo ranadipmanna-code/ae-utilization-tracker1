@@ -1185,16 +1185,16 @@ def upsert_mock_interview_assignment(
                 text(
                     f"""
                     UPDATE {MOCK_INTERVIEW_TABLE}
-                    SET c_alias = :ca, trainer_email = :te, trainer_name = :tn,
-                        program_name = :pn, status = :status, source = :source,
-                        remarks = :remarks, updated_on = NOW()
+                   SET c_alias = :ca, trainer_email = :te, trainer_name = :tn,
+                        program_name = :pn, class_link = :cl, status = :status,
+                        source = :source, remarks = :remarks, updated_on = NOW()
                     WHERE id = :id
                     """
                 ),
                 {
                     "ca": c_alias, "te": trainer_email, "tn": trainer_name,
-                    "pn": program_name, "status": status, "source": source,
-                    "remarks": remarks, "id": existing[0],
+                    "pn": program_name, "cl": class_link, "status": status,
+                    "source": source, "remarks": remarks, "id": existing[0],
                 },
             )
         else:
@@ -1202,18 +1202,18 @@ def upsert_mock_interview_assignment(
                 text(
                     f"""
                     INSERT INTO {MOCK_INTERVIEW_TABLE}
-                        (extended_ae_email, session_date, slot_time, batch_code,
+                       (extended_ae_email, session_date, slot_time, batch_code,
                          c_alias, trainer_email, trainer_name, program_name,
-                         status, source, remarks)
+                         class_link, status, source, remarks)
                     VALUES
-                        (:ae, :d, :st, :bc, :ca, :te, :tn, :pn, :status, :source, :remarks)
+                       (:ae, :d, :st, :bc, :ca, :te, :tn, :pn, :cl, :status, :source, :remarks)
                     """
                 ),
                 {
                     "ae": extended_ae_email, "d": session_date, "st": slot_time,
                     "bc": batch_code, "ca": c_alias, "te": trainer_email,
-                    "tn": trainer_name, "pn": program_name, "status": status,
-                    "source": source, "remarks": remarks,
+                    "tn": trainer_name, "pn": program_name, "cl": class_link,
+                    "status": status, "source": source, "remarks": remarks,
                 },
             )
 
@@ -1245,8 +1245,8 @@ def get_mock_interview_assignments(
     sql = text(
         f"""
         SELECT id, extended_ae_email, session_date, slot_time, batch_code,
-               c_alias, trainer_email, trainer_name, program_name, status,
-               source, remarks, assigned_on, updated_on
+               c_alias, trainer_email, trainer_name, program_name, class_link,
+               status, source, remarks, assigned_on, updated_on
         FROM {MOCK_INTERVIEW_TABLE}
         WHERE {where}
         """
@@ -1259,8 +1259,7 @@ def get_mock_interview_assignments(
         # rather than crashing the whole Sessions tab over a missing table.
         return pd.DataFrame(columns=[
             "id", "extended_ae_email", "session_date", "slot_time", "batch_code",
-            "c_alias", "trainer_email", "trainer_name", "program_name", "status",
-            "source", "assigned_on", "updated_on",
+           "c_alias", "trainer_email", "trainer_name", "program_name", "class_link", "status",
         ])
 
 
