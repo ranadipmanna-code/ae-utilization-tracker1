@@ -1110,6 +1110,7 @@ def upsert_mock_interview_assignment(
     trainer_email: str | None = None,
     trainer_name: str | None = None,
     program_name: str | None = None,
+    class_link: str | None = None,
     status: str = "Selected",
     source: str = "auto",
     remarks: str | None = None,
