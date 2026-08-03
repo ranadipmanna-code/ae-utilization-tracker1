@@ -1466,6 +1466,7 @@ def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool
                     trainer_email=row.get("email_id"),
                     trainer_name=(str(row.get("f_name") or "") + " " + str(row.get("l_name") or "")).strip(),
                     program_name=row.get("program_name"),
+                    class_link=row.get("class_link"),
                     status=sel,
                     source="manual",
                     remarks=remarks_val if sel in ("Not Selected", "Rejected") else None,
@@ -2658,7 +2659,8 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                         db.upsert_mock_interview_assignment(
                             user["email"], row["session_date"], row["slot_time"],
                             row["batch_code"], row["c_alias"], row.get("trainer_email"),
-                            row.get("trainer_name"), row.get("program_name"),
+                       row.get("trainer_name"), row.get("program_name"),
+                            class_link=row.get("class_link"),
                             status=new_status, source="manual",
                         )
                         changed += 1
