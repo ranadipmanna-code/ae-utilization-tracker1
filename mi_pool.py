@@ -130,7 +130,8 @@ def merge_mi_blocks(cmis_rows: pd.DataFrame) -> list[dict]:
             "c_alias": first.get("c_alias"),
             "trainer_email": first.get("email_id"),
             "trainer_name": trainer,
-            "program_name": first.get("program_name"),
+           "program_name": first.get("program_name"),
+            "class_link": first.get("class_link"),
             "slot_count": len(run),
         })
 
