@@ -1454,6 +1454,78 @@ def get_selections_for_emails(
 
 
 @st.cache_data(ttl=45, show_spinner=False)
+def _slot_range_minutes(slot: str):
+    """(start_min, end_min) for a slot_time string like '10:00 AM - 12:00 PM'.
+    Returns (None, None) if unparseable. Handles CMIS's occasional no-space
+    format ('07:30PM') too."""
+    if not slot or "-" not in str(slot):
+        return None, None
+    try:
+        a, b = [s.strip() for s in str(slot).split("-", 1)]
+        ta = pd.to_datetime(a, errors="coerce")
+        tb = pd.to_datetime(b, errors="coerce")
+        if pd.isna(ta) or pd.isna(tb):
+            return None, None
+        return ta.hour * 60 + ta.minute, tb.hour * 60 + tb.minute
+    except Exception:
+        return None, None
+
+
+def get_busy_ranges(email: str, role: str, day: date) -> list[tuple[int, int]]:
+    """Every committed time-range [start_min, end_min) for this user on `day`,
+    unioned across ALL three commitment types:
+
+        * Training  -- their own CMIS teaching slots (resolve_member_calendar,
+                       default_task == 'teaching')
+        * Evaluation-- their claimed rows in the role's selection table
+        * Mock Interview -- their claimed rows in mock_interview_assignment
+
+    This is the single source of truth for "is this person already busy at
+    this time", used to BLOCK any new overlapping Evaluation/MI booking.
+    Returns a list of (start_min, end_min) tuples; overlapping/adjacent ranges
+    are left as-is (the caller only needs intersection tests).
+    """
+    CLAIMED_LOCAL = {"Selected", "Confirmed", "Choosing"}
+    ranges: list[tuple[int, int]] = []
+
+    def _add(slot):
+        s, e = _slot_range_minutes(slot)
+        if s is not None and e is not None and e > s:
+            ranges.append((s, e))
+
+    # --- Training (own teaching slots) ---
+    try:
+        cal = resolve_member_calendar(email, day, day)
+        if not cal.empty:
+            for _, r in cal.iterrows():
+                if str(r.get("default_task")) == "teaching":
+                    _add(r.get("slot_time"))
+    except Exception:
+        pass
+
+    # --- Evaluations (claimed) ---
+    try:
+        sel = get_selections_for_role(role, email, day, day)
+        if not sel.empty:
+            for _, r in sel.iterrows():
+                if str(r.get("status")) in CLAIMED_LOCAL:
+                    _add(r.get("slot_time"))
+    except Exception:
+        pass
+
+    # --- Mock Interviews (claimed) ---
+    try:
+        mi = get_mock_interview_assignments(email, day, day)
+        if not mi.empty:
+            for _, r in mi.iterrows():
+                if str(r.get("status")) in CLAIMED_LOCAL:
+                    _add(r.get("slot_time"))
+    except Exception:
+        pass
+
+    return ranges
+
+
 def get_team_selections(core_ae_email: str, from_date: date, to_date: date) -> pd.DataFrame:
     """
     Every selection tied to this Core AE's team for the period, from BOTH
