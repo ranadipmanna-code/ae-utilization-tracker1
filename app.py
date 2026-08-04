@@ -1115,23 +1115,6 @@ def _admin_manage_tab(user, role):
                         else:
                             st.error((m1 if not ok1 else "") + " " + (m2 if not ok2 else ""))
 
-        with st.expander("\U0001F5D1\ufe0f Delete a member (permanent)", expanded=False):
-            if users.empty:
-                st.caption("No members to delete.")
-            else:
-                dpick = st.selectbox("Member to delete", users["email"].tolist(), key="mgr_del_pick")
-                st.warning("This PERMANENTLY removes the row. To keep the record but mark "
-                           "them as gone, use 'Edit / set status \u2192 Inactive' instead.")
-                conf = st.text_input("Type CONFIRM to delete", key="mgr_del_conf")
-                if st.button("Delete member", key="mgr_del_btn"):
-                    if conf.strip().upper() != "CONFIRM":
-                        st.error("Type CONFIRM (in caps) to proceed.")
-                    else:
-                        ok, msg = db.delete_user(dpick)
-                        if ok:
-                            db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
-                        else:
-                            st.error(msg)
 
     # ================= AE MAPPING (ae_extae) =================
     elif "AE Mapping" in sec:
