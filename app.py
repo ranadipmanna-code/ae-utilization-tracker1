@@ -1046,30 +1046,37 @@ def dashboard():
 
 @st.fragment
 def _admin_manage_tab(user, role):
-    """Admin-only management console: edit user_roles, ae_extae and
-    core_ae_faculty_map directly from the portal. Add/edit freely; delete is
-    gated behind a typed CONFIRM. Emails are free-text but format-validated
-    (catches the 'andip.org' typo class). Every write clears caches so the
-    change shows immediately across the app."""
+    """Admin-only management console for user_roles, ae_extae and
+    core_ae_faculty_map. Add/edit freely; delete is CONFIRM-gated. Each record
+    also has an ACTIVE flag (1=active, 0=inactive) that is a LABEL ONLY -- it
+    never hides anyone from the app; it just records who's still in the org.
+    Emails are free-text but format-validated (catches 'andip.org'-type typos)."""
     if role != "admin":
         st.warning("Admins only.")
         return
 
     st.markdown("### \u2699\ufe0f Manage")
-    st.caption("Edits here write straight to the database. Add/edit is instant; "
-               "deletes need a typed confirmation.")
+    st.caption("Edits write straight to the database. The Active flag is a label "
+               "only \u2014 marking someone inactive keeps them fully working in the "
+               "app; it just records that they've left the org. Deletes need a typed "
+               "confirmation.")
 
     sec = st.radio(
         "Section", ["\U0001F465 Members", "\U0001F517 AE Mapping", "\U0001F9D1\u200D\U0001F3EB Faculty Map"],
         horizontal=True, key="manage_section", label_visibility="collapsed",
     )
 
+    def _act_label(v) -> str:
+        return "\U0001F7E2 Active" if int(v) == 1 else "\u26AB Inactive"
+
     # ================= MEMBERS (user_roles) =================
     if sec.endswith("Members"):
         st.markdown("#### Members (logins & roles)")
-        users = db.list_users()
+        users = db.list_users_with_status()
         if not users.empty:
-            _light_df_table(users[["email", "name", "role"]])
+            disp = users[["email", "name", "role", "active"]].copy()
+            disp["active"] = disp["active"].map(_act_label)
+            _light_df_table(disp)
 
         with st.expander("\u2795 Add a member", expanded=False):
             with st.form("mgr_add_user"):
@@ -1084,35 +1091,39 @@ def _admin_manage_tab(user, role):
                     else:
                         st.error(msg)
 
-        with st.expander("\u270f\ufe0f Edit a member", expanded=False):
+        with st.expander("\u270f\ufe0f Edit / set status", expanded=False):
             if users.empty:
                 st.caption("No members yet.")
             else:
                 pick = st.selectbox("Member", users["email"].tolist(), key="mgr_edit_pick")
                 cur = users[users["email"] == pick].iloc[0]
                 with st.form("mgr_edit_user"):
-                    c1, c2 = st.columns(2)
+                    c1, c2, c3 = st.columns(3)
                     en = c1.text_input("Name", value=cur["name"] or "", key="mgr_e_name")
                     roles = ["extended_ae", "core_ae", "admin"]
                     er = c2.selectbox("Role", roles,
                                       index=roles.index(cur["role"]) if cur["role"] in roles else 0,
                                       key="mgr_e_role")
+                    st_opts = ["Active", "Inactive"]
+                    est = c3.selectbox("Status", st_opts,
+                                       index=0 if int(cur["active"]) == 1 else 1, key="mgr_e_status")
                     if st.form_submit_button("Save changes", type="primary"):
-                        ok, msg = db.update_user(pick, en, er)
-                        if ok:
-                            db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                        ok1, m1 = db.update_user(pick, en, er)
+                        ok2, m2 = db.set_user_active(pick, 1 if est == "Active" else 0)
+                        if ok1 and ok2:
+                            db.clear_app_caches(); st.success("Saved."); st.rerun(scope="fragment")
                         else:
-                            st.error(msg)
+                            st.error((m1 if not ok1 else "") + " " + (m2 if not ok2 else ""))
 
-        with st.expander("\U0001F5D1\ufe0f Delete a member", expanded=False):
+        with st.expander("\U0001F5D1\ufe0f Delete a member (permanent)", expanded=False):
             if users.empty:
                 st.caption("No members to delete.")
             else:
                 dpick = st.selectbox("Member to delete", users["email"].tolist(), key="mgr_del_pick")
-                st.warning("Deleting a login does not remove them from AE mapping or "
-                           "the faculty map — clean those up separately if needed.")
+                st.warning("This PERMANENTLY removes the row. To keep the record but mark "
+                           "them as gone, use 'Edit / set status \u2192 Inactive' instead.")
                 conf = st.text_input("Type CONFIRM to delete", key="mgr_del_conf")
-                if st.button("Delete member", type="secondary", key="mgr_del_btn"):
+                if st.button("Delete member", key="mgr_del_btn"):
                     if conf.strip().upper() != "CONFIRM":
                         st.error("Type CONFIRM (in caps) to proceed.")
                     else:
@@ -1125,19 +1136,20 @@ def _admin_manage_tab(user, role):
     # ================= AE MAPPING (ae_extae) =================
     elif "AE Mapping" in sec:
         st.markdown("#### Core \u2194 Extended AE pairing")
-        pairs = db.get_ae_pairings()
+        pairs = db.list_pairings_with_status()
         if not pairs.empty:
-            _light_df_table(pairs)
+            disp = pairs.copy()
+            disp["active"] = disp["active"].map(_act_label)
+            _light_df_table(disp)
 
-        users = db.list_users()
+        users = db.list_users_with_status()
         core_opts = users[users["role"] == "core_ae"]["email"].tolist() if not users.empty else []
         core_pick = st.selectbox("Core AE", core_opts or ["(no core AEs yet)"], key="mgr_map_core")
-
         current = db.extended_aes_for_core(core_pick) if core_opts else []
         st.caption(f"Currently paired: {', '.join(current) if current else '(none)'}")
 
         with st.form("mgr_set_pairing"):
-            st.markdown("Set up to 3 Extended AEs for this Core AE (leave blank to clear a slot):")
+            st.markdown("Set up to 3 Extended AEs (leave blank to clear a slot):")
             c1, c2, c3 = st.columns(3)
             padded = (current + ["", "", ""])[:3]
             e1 = c1.text_input("Extended AE 1", value=padded[0], key="mgr_ext1")
@@ -1145,8 +1157,7 @@ def _admin_manage_tab(user, role):
             e3 = c3.text_input("Extended AE 3", value=padded[2], key="mgr_ext3")
             for e in (e1, e2, e3):
                 if e.strip() and not db.user_exists(e.strip()):
-                    st.warning(f"\u26a0\ufe0f {e.strip()} isn't in Members — they won't be "
-                               f"able to log in until added.")
+                    st.warning(f"\u26a0\ufe0f {e.strip()} isn't in Members \u2014 add them so they can log in.")
             if st.form_submit_button("Save pairing", type="primary"):
                 ok, msg = db.set_ae_pairing(core_pick, [e1, e2, e3])
                 if ok:
@@ -1154,7 +1165,20 @@ def _admin_manage_tab(user, role):
                 else:
                     st.error(msg)
 
-        with st.expander("\U0001F5D1\ufe0f Remove this Core AE's pairing", expanded=False):
+        with st.expander("Set pairing status (active / inactive)", expanded=False):
+            cur_row = pairs[pairs["ae_email_id"].str.lower() == core_pick.lower()] \
+                if not pairs.empty else pairs
+            cur_active = int(cur_row.iloc[0]["active"]) if not cur_row.empty else 1
+            new_st = st.selectbox("Status for this pairing", ["Active", "Inactive"],
+                                  index=0 if cur_active == 1 else 1, key="mgr_map_status")
+            if st.button("Save status", key="mgr_map_status_btn"):
+                ok, msg = db.set_pairing_active(core_pick, 1 if new_st == "Active" else 0)
+                if ok:
+                    db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                else:
+                    st.error(msg)
+
+        with st.expander("\U0001F5D1\ufe0f Remove pairing (permanent)", expanded=False):
             conf = st.text_input("Type CONFIRM to remove", key="mgr_map_del_conf")
             if st.button("Remove pairing", key="mgr_map_del_btn"):
                 if conf.strip().upper() != "CONFIRM":
@@ -1166,22 +1190,31 @@ def _admin_manage_tab(user, role):
                     else:
                         st.error(msg)
 
-    # ================= FACULTY MAP (core_ae_faculty_map) =================
+    # ================= FACULTY MAP (core_ae_faculty_map + faculty_status) =====
     else:
         st.markdown("#### Faculty map (trainer \u2192 Core AE)")
-        users = db.list_users()
+        fac_map = db.list_faculty_map_with_status()
+        if not fac_map.empty:
+            disp = fac_map.copy()
+            disp["active"] = disp["active"].map(_act_label)
+            _light_df_table(disp)
+
         core_opts = db.list_core_ae_emails()
         core_pick = st.selectbox("Core AE", core_opts or ["(no core AEs yet)"], key="mgr_fac_core")
         current = db.faculty_emails_for_core(core_pick) if core_opts else []
+        fac_status = db.get_faculty_status()
         st.caption(f"{len(current)} trainer(s) mapped to {core_pick}.")
         if current:
-            _light_df_table(pd.DataFrame({"trainer_email": current}))
+            tbl = pd.DataFrame({
+                "trainer_email": current,
+                "status": [_act_label(fac_status.get(t.lower(), 1)) for t in current],
+            })
+            _light_df_table(tbl)
 
         with st.form("mgr_add_faculty"):
             fe = st.text_input("Trainer email to add", key="mgr_fac_add")
             if fe.strip() and not db.user_exists(fe.strip()):
-                st.caption("\u2139\ufe0f Note: a trainer usually isn't a portal login — "
-                           "that's fine, this only affects who this Core AE can observe.")
+                st.caption("\u2139\ufe0f A trainer usually isn't a portal login \u2014 that's fine.")
             if st.form_submit_button("Add trainer", type="primary"):
                 ok, msg = db.add_faculty_to_core(core_pick, fe)
                 if ok:
@@ -1189,7 +1222,41 @@ def _admin_manage_tab(user, role):
                 else:
                     st.error(msg)
 
-        with st.expander("\U0001F5D1\ufe0f Remove a trainer", expanded=False):
+        with st.expander("Set a trainer's status (per-trainer)", expanded=False):
+            if not current:
+                st.caption("No trainers mapped.")
+            else:
+                tpick = st.selectbox("Trainer", current, key="mgr_fac_status_pick")
+                cur_a = fac_status.get(tpick.lower(), 1)
+                new_a = st.selectbox("Status", ["Active", "Inactive"],
+                                     index=0 if cur_a == 1 else 1, key="mgr_fac_status_sel")
+                if st.button("Save trainer status", key="mgr_fac_status_btn"):
+                    ok, msg = db.set_faculty_active(tpick, 1 if new_a == "Active" else 0)
+                    if ok:
+                        db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                    else:
+                        st.error(msg)
+
+        with st.expander("Set a map ROW's status (whole row)", expanded=False):
+            if fac_map.empty:
+                st.caption("No rows.")
+            else:
+                rows_for_core = fac_map[fac_map["core_ae_email"].str.lower() == core_pick.lower()]
+                if rows_for_core.empty:
+                    st.caption("No map rows for this Core AE.")
+                else:
+                    rid = st.selectbox("Map row id", rows_for_core["id"].tolist(), key="mgr_fac_row_pick")
+                    rcur = int(rows_for_core[rows_for_core["id"] == rid].iloc[0]["active"])
+                    rnew = st.selectbox("Row status", ["Active", "Inactive"],
+                                        index=0 if rcur == 1 else 1, key="mgr_fac_row_sel")
+                    if st.button("Save row status", key="mgr_fac_row_btn"):
+                        ok, msg = db.set_faculty_map_row_active(int(rid), 1 if rnew == "Active" else 0)
+                        if ok:
+                            db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                        else:
+                            st.error(msg)
+
+        with st.expander("\U0001F5D1\ufe0f Remove a trainer (permanent)", expanded=False):
             if not current:
                 st.caption("No trainers to remove.")
             else:
