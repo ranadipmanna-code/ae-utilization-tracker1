@@ -1570,46 +1570,6 @@ def _canonical_working_day_slots(
         t += step
     return slots
 
-def _slot_end_minutes(slot: str) -> int | None:
-    """Minutes-since-midnight for a slot's END, e.g. '10:00 AM - 12:00 PM' -> 720."""
-    if not slot or "-" not in str(slot):
-        return None
-    try:
-        end = str(slot).split("-", 1)[1].strip()
-        t = pd.to_datetime(end, format="%I:%M %p")
-        return t.hour * 60 + t.minute
-    except Exception:
-        return None
-
-
-def _grid_slots_covered(claimed_slots: set[str]) -> set[str]:
-    """Expand any claimed slot_time strings (including merged multi-hour
-    blocks like '10:00 AM - 12:00 PM') into the set of 30-min canonical grid
-    slots they occupy by TIME RANGE. This is what makes overlap-blocking work:
-    a merged block no longer has to string-match a grid slot -- every grid
-    slot whose time falls inside a claimed block's [start, end) is returned,
-    so it can be removed from the free pool.
-    """
-    covered: set[str] = set()
-    for gslot in _canonical_working_day_slots():
-        g_start = _slot_start_minutes(gslot)
-        g_end = _slot_end_minutes(gslot)
-        if g_end is None:
-            continue
-        for claimed in claimed_slots:
-            c_start = _slot_start_minutes(claimed)
-            c_end = _slot_end_minutes(claimed)
-            if c_end is None:
-                # single unparseable / exact-match fallback
-                if claimed == gslot:
-                    covered.add(gslot)
-                continue
-            # overlap test: grid slot intersects claimed block
-            if g_start < c_end and c_start < g_end:
-                covered.add(gslot)
-                break
-    return covered
-
 
 def _render_day_schedule_summary(
     training_display: pd.DataFrame,
@@ -2634,6 +2594,7 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
             )
             my_mi = my_mi.sort_values(["_date", "slot_time"]).reset_index(drop=True)
             row_meta: dict[str, tuple] = {}   # widget key -> (row, saved status)
+            mi_form = st.form("save_my_mi_form")
             for _, r in my_mi.iterrows():
                 trainer = f"{r.get('f_name') or ''} {r.get('l_name') or ''}".strip() or "Unknown trainer"
                 day_lbl = pd.to_datetime(r["_date"]).strftime("%a, %d %b")
@@ -2652,7 +2613,7 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                 meta_bits = [trainer, r.get("batch_code") or "", r.get("c_alias") or "",
                              r.get("program_name") or ""]
                 meta = " · ".join(b for b in meta_bits if b)
-                cA, cB = st.columns([4, 1.3])
+                cA, cB = mi_form.columns([4, 1.3])
                 with cA:
                     st.markdown(
                         f"<div class='scard {card_cls}'>"
@@ -2661,8 +2622,8 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                         unsafe_allow_html=True,
                     )
                 with cB:
-                    # No st.form here — a plain selectbox reruns on change, so the
-                    # card can recolour instantly. Save is a normal button below.
+                    # Inside st.form now — the dropdown no longer reruns on change
+                    # (so no per-change lag); cards recolour on Save instead.
                     st.selectbox(
                         "status", opts, index=opts.index(live),
                         format_func=lambda o: mi_labels.get(o, o),
@@ -2670,7 +2631,7 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                     )
                 row_meta[wkey] = (r, cur)
 
-            if st.button("💾  Save my Mock Interview choices", type="primary", key="save_my_mi"):
+            if mi_form.form_submit_button("💾  Save my Mock Interview choices", type="primary"):
                 # Validation gate: every interview must be decided (Selected or
                 # Not Selected) before ANY of them is saved. A list left with
                 # "Default" (Pending) rows half-done shouldn't persist -- the
@@ -2705,7 +2666,7 @@ def _render_mock_interviews(user, role, core_ae_email, date_from, date_to):
                         )
                         changed += 1
                     if changed:
-                        db.clear_app_caches()
+                        db.clear_mock_interview_caches()
                         st.success(f"Saved — {changed} Mock Interview decision"
                                    f"{'s' if changed != 1 else ''} recorded.")
                         st.rerun(scope="fragment")
