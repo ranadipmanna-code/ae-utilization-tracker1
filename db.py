@@ -2144,6 +2144,238 @@ def build_email_fix_sql(report: pd.DataFrame) -> str:
 # These clear only the app-DB-backed caches, which are the only ones a write
 # can actually invalidate. The CMIS caches keep their 5-minute TTL and are
 # left alone.
+# ===========================================================================
+# ADMIN MANAGEMENT WRITES — user_roles, ae_extae, core_ae_faculty_map
+# All validated. Emails checked for basic format (catches the missing-letter
+# 'andip.org' class of typo). Callers clear caches after a successful write.
+# ===========================================================================
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def valid_email(email: str) -> bool:
+    return bool(_EMAIL_RE.match((email or "").strip()))
+
+
+# ---- user_roles -----------------------------------------------------------
+def list_users() -> pd.DataFrame:
+    """All accounts, for the admin members table."""
+    try:
+        with app_engine().connect() as conn:
+            return pd.read_sql(
+                text("SELECT id, email, name, role FROM user_roles ORDER BY role, name"),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame(columns=["id", "email", "name", "role"])
+
+
+def user_exists(email: str) -> bool:
+    with app_engine().connect() as conn:
+        row = conn.execute(
+            text("SELECT 1 FROM user_roles WHERE LOWER(email)=LOWER(:e) LIMIT 1"),
+            {"e": (email or "").strip()},
+        ).fetchone()
+    return row is not None
+
+
+def add_user(email: str, name: str, role: str, password: str = "Password123!") -> tuple[bool, str]:
+    """Create a login. Returns (ok, message). Uses the shared-password path
+    (NULL hash/salt) so the new person signs in with the default until they
+    set their own."""
+    email = (email or "").strip()
+    if not valid_email(email):
+        return False, f"'{email}' is not a valid email address."
+    if role not in ("admin", "core_ae", "extended_ae"):
+        return False, f"Unknown role '{role}'."
+    if user_exists(email):
+        return False, f"{email} already exists."
+    try:
+        with app_engine().begin() as conn:
+            conn.execute(
+                text("INSERT INTO user_roles (email, name, role, password, "
+                     "password_hash, password_salt) "
+                     "VALUES (:e, :n, :r, :p, NULL, NULL)"),
+                {"e": email, "n": (name or "").strip(), "r": role, "p": password},
+            )
+        return True, f"Added {email} as {role}."
+    except Exception as exc:
+        return False, f"Could not add user: {exc}"
+
+
+def update_user(email: str, name: str, role: str) -> tuple[bool, str]:
+    """Edit an existing account's name/role (not the email -- changing an
+    email would orphan its mappings; delete+re-add for that)."""
+    email = (email or "").strip()
+    if role not in ("admin", "core_ae", "extended_ae"):
+        return False, f"Unknown role '{role}'."
+    if not user_exists(email):
+        return False, f"{email} not found."
+    try:
+        with app_engine().begin() as conn:
+            conn.execute(
+                text("UPDATE user_roles SET name=:n, role=:r WHERE LOWER(email)=LOWER(:e)"),
+                {"n": (name or "").strip(), "r": role, "e": email},
+            )
+        return True, f"Updated {email}."
+    except Exception as exc:
+        return False, f"Could not update user: {exc}"
+
+
+def delete_user(email: str) -> tuple[bool, str]:
+    """Remove a login. Does NOT touch ae_extae / core_ae_faculty_map -- the
+    caller should warn if this email is still referenced there."""
+    email = (email or "").strip()
+    if not user_exists(email):
+        return False, f"{email} not found."
+    try:
+        with app_engine().begin() as conn:
+            conn.execute(
+                text("DELETE FROM user_roles WHERE LOWER(email)=LOWER(:e)"),
+                {"e": email},
+            )
+        return True, f"Deleted {email}."
+    except Exception as exc:
+        return False, f"Could not delete user: {exc}"
+
+
+# ---- ae_extae (Core <-> Extended pairing) ---------------------------------
+def set_ae_pairing(core_email: str, ext_emails: list[str]) -> tuple[bool, str]:
+    """Replace the Extended-AE list for one Core AE. Up to 3 (ext_ae_1..3).
+    Validates each email's format; deletes existing rows for this core and
+    writes one fresh row. Empty ext list removes the pairing entirely."""
+    core_email = (core_email or "").strip()
+    if not valid_email(core_email):
+        return False, f"Core AE '{core_email}' is not a valid email."
+    cleaned = [e.strip() for e in ext_emails if e and e.strip()]
+    for e in cleaned:
+        if not valid_email(e):
+            return False, f"'{e}' is not a valid email."
+    if len(cleaned) > 3:
+        return False, "A Core AE can have at most 3 Extended AEs (ext_ae_1..3)."
+    # prevent the same Extended AE being paired to two different Cores
+    df = get_ae_pairings()
+    if not df.empty:
+        for _, r in df.iterrows():
+            if str(r["ae_email_id"]).lower() == core_email.lower():
+                continue
+            others = {str(r.get(c)).lower() for c in ("ext_ae_1", "ext_ae_2", "ext_ae_3")
+                      if r.get(c) and not pd.isna(r.get(c))}
+            for e in cleaned:
+                if e.lower() in others:
+                    return False, (f"{e} is already paired to "
+                                   f"{r['ae_email_id']} -- unpair there first.")
+    padded = (cleaned + [None, None, None])[:3]
+    try:
+        with app_engine().begin() as conn:
+            conn.execute(
+                text("DELETE FROM ae_extae WHERE LOWER(ae_email_id)=LOWER(:c)"),
+                {"c": core_email},
+            )
+            if cleaned:
+                conn.execute(
+                    text("INSERT INTO ae_extae (ae_email_id, ext_ae_1, ext_ae_2, ext_ae_3, "
+                         "updated_on) VALUES (:c, :a, :b, :d, NOW())"),
+                    {"c": core_email, "a": padded[0], "b": padded[1], "d": padded[2]},
+                )
+        return True, f"Saved pairing for {core_email}."
+    except Exception as exc:
+        return False, f"Could not save pairing: {exc}"
+
+
+def remove_ae_pairing(core_email: str) -> tuple[bool, str]:
+    core_email = (core_email or "").strip()
+    try:
+        with app_engine().begin() as conn:
+            res = conn.execute(
+                text("DELETE FROM ae_extae WHERE LOWER(ae_email_id)=LOWER(:c)"),
+                {"c": core_email},
+            )
+        return True, f"Removed pairing for {core_email}."
+    except Exception as exc:
+        return False, f"Could not remove pairing: {exc}"
+
+
+# ---- core_ae_faculty_map (trainer -> Core AE) -----------------------------
+def _faculty_rows_for_core(conn, core_email: str):
+    return conn.execute(
+        text("SELECT id, faculty_1, faculty_2, faculty_3, faculty_4, faculty_5 "
+             "FROM core_ae_faculty_map WHERE LOWER(core_ae_email)=LOWER(:c) ORDER BY id"),
+        {"c": core_email},
+    ).mappings().fetchall()
+
+
+def add_faculty_to_core(core_email: str, faculty_email: str) -> tuple[bool, str]:
+    """Add a trainer under a Core AE. Handles the 5-column-per-row layout:
+    fills the first empty faculty_N slot in an existing row, or inserts a NEW
+    row when every existing row is full. Blocks the same trainer appearing
+    under two different Core AEs (which would double-book their sessions)."""
+    core_email = (core_email or "").strip()
+    faculty_email = (faculty_email or "").strip()
+    if not valid_email(core_email):
+        return False, f"Core AE '{core_email}' is not a valid email."
+    if not valid_email(faculty_email):
+        return False, f"Trainer '{faculty_email}' is not a valid email."
+    fac_cols = ("faculty_1", "faculty_2", "faculty_3", "faculty_4", "faculty_5")
+    try:
+        with app_engine().begin() as conn:
+            # global duplicate check
+            allrows = conn.execute(
+                text("SELECT core_ae_email, faculty_1, faculty_2, faculty_3, faculty_4, "
+                     "faculty_5 FROM core_ae_faculty_map")
+            ).mappings().fetchall()
+            for r in allrows:
+                for c in fac_cols:
+                    v = (r[c] or "").strip().lower()
+                    if v == faculty_email.lower():
+                        if (r["core_ae_email"] or "").lower() == core_email.lower():
+                            return False, f"{faculty_email} is already under {core_email}."
+                        return False, (f"{faculty_email} is already mapped to "
+                                       f"{r['core_ae_email']} -- remove there first.")
+            # find an empty slot in an existing row
+            rows = _faculty_rows_for_core(conn, core_email)
+            for r in rows:
+                for c in fac_cols:
+                    if not (r[c] or "").strip():
+                        conn.execute(
+                            text(f"UPDATE core_ae_faculty_map SET {c}=:f, updated_on=NOW() "
+                                 f"WHERE id=:id"),
+                            {"f": faculty_email, "id": r["id"]},
+                        )
+                        return True, f"Added {faculty_email} under {core_email}."
+            # all rows full (or none exist) -> new row
+            conn.execute(
+                text("INSERT INTO core_ae_faculty_map (core_ae_email, faculty_1, updated_on) "
+                     "VALUES (:c, :f, NOW())"),
+                {"c": core_email, "f": faculty_email},
+            )
+        return True, f"Added {faculty_email} under {core_email} (new row)."
+    except Exception as exc:
+        return False, f"Could not add trainer: {exc}"
+
+
+def remove_faculty_from_core(core_email: str, faculty_email: str) -> tuple[bool, str]:
+    """Clear a trainer from a Core AE's map (NULLs the slot; leaves the row)."""
+    core_email = (core_email or "").strip()
+    faculty_email = (faculty_email or "").strip()
+    fac_cols = ("faculty_1", "faculty_2", "faculty_3", "faculty_4", "faculty_5")
+    try:
+        with app_engine().begin() as conn:
+            rows = _faculty_rows_for_core(conn, core_email)
+            for r in rows:
+                for c in fac_cols:
+                    if (r[c] or "").strip().lower() == faculty_email.lower():
+                        conn.execute(
+                            text(f"UPDATE core_ae_faculty_map SET {c}=NULL, updated_on=NOW() "
+                                 f"WHERE id=:id"),
+                            {"id": r["id"]},
+                        )
+                        return True, f"Removed {faculty_email} from {core_email}."
+        return False, f"{faculty_email} not found under {core_email}."
+    except Exception as exc:
+        return False, f"Could not remove trainer: {exc}"
+
+
 _APP_DB_CACHED = (
     "get_user_roles",
     "get_core_ae_faculty_map",
