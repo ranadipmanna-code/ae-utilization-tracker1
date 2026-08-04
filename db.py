@@ -2376,6 +2376,116 @@ def remove_faculty_from_core(core_email: str, faculty_email: str) -> tuple[bool,
         return False, f"Could not remove trainer: {exc}"
 
 
+# ---- ACTIVE flag (LABEL ONLY -- never filters anyone out of the app) ------
+# active = 1 (default) means "in the organisation"; 0 means "no longer in the
+# org". This is purely informational: readers do NOT filter on it, so an
+# inactive person still logs in and still appears in every pool/dropdown.
+# Toggling is reversible; the row is never removed by this.
+
+def set_user_active(email: str, active: int) -> tuple[bool, str]:
+    email = (email or "").strip()
+    try:
+        with app_engine().begin() as conn:
+            conn.execute(
+                text("UPDATE user_roles SET active=:a WHERE LOWER(email)=LOWER(:e)"),
+                {"a": 1 if int(active) else 0, "e": email},
+            )
+        return True, f"{email} marked {'active' if int(active) else 'inactive'}."
+    except Exception as exc:
+        return False, f"Could not update status: {exc}"
+
+
+def set_pairing_active(core_email: str, active: int) -> tuple[bool, str]:
+    core_email = (core_email or "").strip()
+    try:
+        with app_engine().begin() as conn:
+            conn.execute(
+                text("UPDATE ae_extae SET active=:a WHERE LOWER(ae_email_id)=LOWER(:c)"),
+                {"a": 1 if int(active) else 0, "c": core_email},
+            )
+        return True, f"Pairing for {core_email} marked {'active' if int(active) else 'inactive'}."
+    except Exception as exc:
+        return False, f"Could not update pairing status: {exc}"
+
+
+def set_faculty_map_row_active(row_id: int, active: int) -> tuple[bool, str]:
+    try:
+        with app_engine().begin() as conn:
+            conn.execute(
+                text("UPDATE core_ae_faculty_map SET active=:a WHERE id=:id"),
+                {"a": 1 if int(active) else 0, "id": int(row_id)},
+            )
+        return True, f"Map row #{row_id} marked {'active' if int(active) else 'inactive'}."
+    except Exception as exc:
+        return False, f"Could not update map row status: {exc}"
+
+
+def set_faculty_active(trainer_email: str, active: int) -> tuple[bool, str]:
+    """Per-trainer active flag, stored in faculty_status (trainers usually
+    aren't user_roles logins). Upserts the row."""
+    trainer_email = (trainer_email or "").strip()
+    try:
+        with app_engine().begin() as conn:
+            conn.execute(
+                text("INSERT INTO faculty_status (trainer_email, active, updated_on) "
+                     "VALUES (:e, :a, NOW()) "
+                     "ON DUPLICATE KEY UPDATE active=:a, updated_on=NOW()"),
+                {"e": trainer_email, "a": 1 if int(active) else 0},
+            )
+        return True, f"{trainer_email} marked {'active' if int(active) else 'inactive'}."
+    except Exception as exc:
+        return False, f"Could not update trainer status: {exc}"
+
+
+def get_faculty_status() -> dict:
+    """{trainer_email(lower) -> active int}. Missing = active (1) by default."""
+    try:
+        with app_engine().connect() as conn:
+            df = pd.read_sql(text("SELECT trainer_email, active FROM faculty_status"), conn)
+        return {str(r["trainer_email"]).strip().lower(): int(r["active"])
+                for _, r in df.iterrows()}
+    except Exception:
+        return {}
+
+
+def list_users_with_status() -> pd.DataFrame:
+    """Members plus their active flag, for the admin table. Does NOT filter."""
+    try:
+        with app_engine().connect() as conn:
+            return pd.read_sql(
+                text("SELECT id, email, name, role, "
+                     "COALESCE(active,1) AS active FROM user_roles ORDER BY role, name"),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame(columns=["id", "email", "name", "role", "active"])
+
+
+def list_pairings_with_status() -> pd.DataFrame:
+    try:
+        with app_engine().connect() as conn:
+            return pd.read_sql(
+                text("SELECT ae_email_id, ext_ae_1, ext_ae_2, ext_ae_3, "
+                     "COALESCE(active,1) AS active FROM ae_extae ORDER BY ae_email_id"),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame()
+
+
+def list_faculty_map_with_status() -> pd.DataFrame:
+    try:
+        with app_engine().connect() as conn:
+            return pd.read_sql(
+                text("SELECT id, core_ae_email, faculty_1, faculty_2, faculty_3, "
+                     "faculty_4, faculty_5, COALESCE(active,1) AS active "
+                     "FROM core_ae_faculty_map ORDER BY core_ae_email, id"),
+                conn,
+            )
+    except Exception:
+        return pd.DataFrame()
+
+
 _APP_DB_CACHED = (
     "get_user_roles",
     "get_core_ae_faculty_map",
