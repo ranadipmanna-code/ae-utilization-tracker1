@@ -1571,6 +1571,45 @@ def _canonical_working_day_slots(
     return slots
 
 
+def _slot_end_minutes(slot: str) -> int | None:
+    """Minutes-since-midnight for a slot's END, e.g. '10:00 AM - 12:00 PM' -> 720."""
+    if not slot or "-" not in str(slot):
+        return None
+    try:
+        end = str(slot).split("-", 1)[1].strip()
+        t = pd.to_datetime(end, format="%I:%M %p")
+        return t.hour * 60 + t.minute
+    except Exception:
+        return None
+
+
+def _grid_slots_covered(claimed_slots: set[str]) -> set[str]:
+    """Expand any claimed slot_time strings (including merged multi-hour
+    blocks like '10:00 AM - 12:00 PM') into the set of 30-min canonical grid
+    slots they occupy by TIME RANGE. This is what makes overlap-blocking work:
+    a merged block no longer has to string-match a grid slot -- every grid
+    slot whose time falls inside a claimed block's [start, end) is returned,
+    so it can be removed from the free pool.
+    """
+    covered: set[str] = set()
+    for gslot in _canonical_working_day_slots():
+        g_start = _slot_start_minutes(gslot)
+        g_end = _slot_end_minutes(gslot)
+        if g_end is None:
+            continue
+        for claimed in claimed_slots:
+            c_start = _slot_start_minutes(claimed)
+            c_end = _slot_end_minutes(claimed)
+            if c_end is None:
+                if claimed == gslot:
+                    covered.add(gslot)
+                continue
+            if g_start < c_end and c_start < g_end:
+                covered.add(gslot)
+                break
+    return covered
+
+
 def _render_day_schedule_summary(
     training_display: pd.DataFrame,
     eval_claims_display: pd.DataFrame,
@@ -1731,7 +1770,7 @@ def _calendar_wizard_tab(user, role):
     # is still free time, and the working day shouldn't silently stretch if
     # a stray CMIS row exists after hours.
     day_grid = set(_canonical_working_day_slots())
-    free_slots = day_grid - training_slot_times
+    free_slots = day_grid - _grid_slots_covered(training_slot_times)
 
     if not free_slots:
         st.info("No free time on this day \u2014 fully booked with training.")
@@ -1742,7 +1781,7 @@ def _calendar_wizard_tab(user, role):
     # ---- Mock Interview -- FIRST, nationwide, in free time NOT already
     # taken by a saved Evaluation pick today -----------------------------
     st.markdown("#### \U0001F3AF Mock Interview")
-    mi_free_slots = free_slots - eval_claimed_slots
+    mi_free_slots = free_slots - _grid_slots_covered(eval_claimed_slots)
     mi_candidates = db.get_all_mock_interview_sessions(picked_day, picked_day)
     if not mi_candidates.empty:
         mi_candidates = mi_candidates[mi_candidates["slot_time"].isin(mi_free_slots)].copy()
@@ -1764,7 +1803,7 @@ def _calendar_wizard_tab(user, role):
     # tab -- scoped to this day's free time NOT already taken by a saved
     # Mock Interview pick today. ------------------------------------------
     st.markdown("#### \U0001F4DD Evaluation")
-    eval_free_slots = free_slots - mi_claimed_slots
+    eval_free_slots = free_slots - _grid_slots_covered(mi_claimed_slots)
     eval_candidates = pd.DataFrame()
     if not all_day.empty:
         eval_candidates = all_day[
@@ -3490,6 +3529,47 @@ def main():
         dashboard()
 
 
+def _user_committed_ranges_by_day(df, user_email: str) -> dict:
+    """Map {date -> [(start_min, end_min), ...]} of time-ranges the user has
+    ALREADY claimed (status in CLAIMED and owned by them) among the rows in df.
+    Used to lock any available card whose time overlaps one of these, so a
+    person can't book two observations/MIs that run at the same time.
+    """
+    out: dict = {}
+    if df.empty:
+        return out
+    for _, r in df.iterrows():
+        owner = (r.get("_owner") or "")
+        if not owner or owner.lower() != user_email.lower():
+            continue
+        if r.get("Status") not in CLAIMED:
+            continue
+        s = _slot_start_minutes(str(r.get("slot_time")))
+        e = _slot_end_minutes(str(r.get("slot_time")))
+        if e is None:
+            continue
+        out.setdefault(r.get("_date"), []).append((s, e))
+    return out
+
+
+def _overlaps_committed(r, committed: dict) -> bool:
+    """True if row r's time-range intersects any already-committed range on
+    the same day (excluding an exact self-match, so a row doesn't lock itself)."""
+    ranges = committed.get(r.get("_date"))
+    if not ranges:
+        return False
+    s = _slot_start_minutes(str(r.get("slot_time")))
+    e = _slot_end_minutes(str(r.get("slot_time")))
+    if e is None:
+        return False
+    for (cs, ce) in ranges:
+        if s == cs and e == ce:
+            continue  # that's this same booking, not a conflict
+        if s < ce and cs < e:
+            return True
+    return False
+
+
 def _render_session_cards(df, user_email, can_select, pending, key_prefix="") -> bool:
     """The original card list, kept as an opt-in view.
 
@@ -3529,6 +3609,11 @@ def _render_session_cards(df, user_email, can_select, pending, key_prefix="") ->
         return "" if s.lower() in ("nan", "none", "null") else s
 
     # `pending` is the caller's dict — fill it, never rebind it.
+
+    # Time-ranges this user has already committed (per day) -- an available
+    # card overlapping any of these gets locked instead of shown as pickable,
+    # so two sessions at the same time can't both be booked.
+    _committed = _user_committed_ranges_by_day(df, user_email)
 
     with st.form(f"{key_prefix}claim_form_{page}"):
         shown_section = None
@@ -3596,7 +3681,13 @@ def _render_session_cards(df, user_email, can_select, pending, key_prefix="") ->
                         unsafe_allow_html=True,
                     )
                 with cB:
-                    if can_select and editable:
+                    _blocked = (not claimed_row) and _overlaps_committed(r, _committed)
+                    if _blocked:
+                        st.markdown(
+                            "<div class='locked-status'>\U0001F512 Time already booked</div>",
+                            unsafe_allow_html=True,
+                        )
+                    elif can_select and editable:
                         # Legacy rows saved as "Choosing"/"Confirmed" under the
                         # old 4-option flow aren't in STATUS_OPTIONS anymore.
                         # Compare against what the widget actually SHOWS
