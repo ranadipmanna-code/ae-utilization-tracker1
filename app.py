@@ -1570,6 +1570,46 @@ def _canonical_working_day_slots(
         t += step
     return slots
 
+def _slot_end_minutes(slot: str) -> int | None:
+    """Minutes-since-midnight for a slot's END, e.g. '10:00 AM - 12:00 PM' -> 720."""
+    if not slot or "-" not in str(slot):
+        return None
+    try:
+        end = str(slot).split("-", 1)[1].strip()
+        t = pd.to_datetime(end, format="%I:%M %p")
+        return t.hour * 60 + t.minute
+    except Exception:
+        return None
+
+
+def _grid_slots_covered(claimed_slots: set[str]) -> set[str]:
+    """Expand any claimed slot_time strings (including merged multi-hour
+    blocks like '10:00 AM - 12:00 PM') into the set of 30-min canonical grid
+    slots they occupy by TIME RANGE. This is what makes overlap-blocking work:
+    a merged block no longer has to string-match a grid slot -- every grid
+    slot whose time falls inside a claimed block's [start, end) is returned,
+    so it can be removed from the free pool.
+    """
+    covered: set[str] = set()
+    for gslot in _canonical_working_day_slots():
+        g_start = _slot_start_minutes(gslot)
+        g_end = _slot_end_minutes(gslot)
+        if g_end is None:
+            continue
+        for claimed in claimed_slots:
+            c_start = _slot_start_minutes(claimed)
+            c_end = _slot_end_minutes(claimed)
+            if c_end is None:
+                # single unparseable / exact-match fallback
+                if claimed == gslot:
+                    covered.add(gslot)
+                continue
+            # overlap test: grid slot intersects claimed block
+            if g_start < c_end and c_start < g_end:
+                covered.add(gslot)
+                break
+    return covered
+
 
 def _render_day_schedule_summary(
     training_display: pd.DataFrame,
