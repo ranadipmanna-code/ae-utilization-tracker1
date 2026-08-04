@@ -1007,7 +1007,7 @@ def dashboard():
     # tab is gone too — replaced by the single-day wizard.
     if role == "admin":
         made = st.tabs(["📅  Calendar", "📝  Evaluations", "🎯  Mock Interview",
-                        "👥  My Extended AE Team"])
+                        "👥  My Extended AE Team", "⚙️  Manage"])
         with made[0]:
             _admin_utilization_tab(user, role)
         with made[1]:
@@ -1016,6 +1016,8 @@ def dashboard():
             mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
             _rollup_tab(user, role)
+        with made[4]:
+            _admin_manage_tab(user, role)
     elif role == "core_ae":
         made = st.tabs(["📅  Calendar", "📝  Evaluations", "🎯  Mock Interview",
                         "👥  My Extended AE Team", "📊  Weekly Summary"])
@@ -1040,6 +1042,168 @@ def dashboard():
             mi_pool.render_mi_pool_tab(user, role)
         with made[3]:
             _my_core_tab(user)
+
+
+@st.fragment
+def _admin_manage_tab(user, role):
+    """Admin-only management console: edit user_roles, ae_extae and
+    core_ae_faculty_map directly from the portal. Add/edit freely; delete is
+    gated behind a typed CONFIRM. Emails are free-text but format-validated
+    (catches the 'andip.org' typo class). Every write clears caches so the
+    change shows immediately across the app."""
+    if role != "admin":
+        st.warning("Admins only.")
+        return
+
+    st.markdown("### \u2699\ufe0f Manage")
+    st.caption("Edits here write straight to the database. Add/edit is instant; "
+               "deletes need a typed confirmation.")
+
+    sec = st.radio(
+        "Section", ["\U0001F465 Members", "\U0001F517 AE Mapping", "\U0001F9D1\u200D\U0001F3EB Faculty Map"],
+        horizontal=True, key="manage_section", label_visibility="collapsed",
+    )
+
+    # ================= MEMBERS (user_roles) =================
+    if sec.endswith("Members"):
+        st.markdown("#### Members (logins & roles)")
+        users = db.list_users()
+        if not users.empty:
+            _light_df_table(users[["email", "name", "role"]])
+
+        with st.expander("\u2795 Add a member", expanded=False):
+            with st.form("mgr_add_user"):
+                c1, c2, c3 = st.columns(3)
+                ae = c1.text_input("Email", key="mgr_u_email")
+                an = c2.text_input("Name", key="mgr_u_name")
+                ar = c3.selectbox("Role", ["extended_ae", "core_ae", "admin"], key="mgr_u_role")
+                if st.form_submit_button("Add member", type="primary"):
+                    ok, msg = db.add_user(ae, an, ar)
+                    if ok:
+                        db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                    else:
+                        st.error(msg)
+
+        with st.expander("\u270f\ufe0f Edit a member", expanded=False):
+            if users.empty:
+                st.caption("No members yet.")
+            else:
+                pick = st.selectbox("Member", users["email"].tolist(), key="mgr_edit_pick")
+                cur = users[users["email"] == pick].iloc[0]
+                with st.form("mgr_edit_user"):
+                    c1, c2 = st.columns(2)
+                    en = c1.text_input("Name", value=cur["name"] or "", key="mgr_e_name")
+                    roles = ["extended_ae", "core_ae", "admin"]
+                    er = c2.selectbox("Role", roles,
+                                      index=roles.index(cur["role"]) if cur["role"] in roles else 0,
+                                      key="mgr_e_role")
+                    if st.form_submit_button("Save changes", type="primary"):
+                        ok, msg = db.update_user(pick, en, er)
+                        if ok:
+                            db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                        else:
+                            st.error(msg)
+
+        with st.expander("\U0001F5D1\ufe0f Delete a member", expanded=False):
+            if users.empty:
+                st.caption("No members to delete.")
+            else:
+                dpick = st.selectbox("Member to delete", users["email"].tolist(), key="mgr_del_pick")
+                st.warning("Deleting a login does not remove them from AE mapping or "
+                           "the faculty map — clean those up separately if needed.")
+                conf = st.text_input("Type CONFIRM to delete", key="mgr_del_conf")
+                if st.button("Delete member", type="secondary", key="mgr_del_btn"):
+                    if conf.strip().upper() != "CONFIRM":
+                        st.error("Type CONFIRM (in caps) to proceed.")
+                    else:
+                        ok, msg = db.delete_user(dpick)
+                        if ok:
+                            db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                        else:
+                            st.error(msg)
+
+    # ================= AE MAPPING (ae_extae) =================
+    elif "AE Mapping" in sec:
+        st.markdown("#### Core \u2194 Extended AE pairing")
+        pairs = db.get_ae_pairings()
+        if not pairs.empty:
+            _light_df_table(pairs)
+
+        users = db.list_users()
+        core_opts = users[users["role"] == "core_ae"]["email"].tolist() if not users.empty else []
+        core_pick = st.selectbox("Core AE", core_opts or ["(no core AEs yet)"], key="mgr_map_core")
+
+        current = db.extended_aes_for_core(core_pick) if core_opts else []
+        st.caption(f"Currently paired: {', '.join(current) if current else '(none)'}")
+
+        with st.form("mgr_set_pairing"):
+            st.markdown("Set up to 3 Extended AEs for this Core AE (leave blank to clear a slot):")
+            c1, c2, c3 = st.columns(3)
+            padded = (current + ["", "", ""])[:3]
+            e1 = c1.text_input("Extended AE 1", value=padded[0], key="mgr_ext1")
+            e2 = c2.text_input("Extended AE 2", value=padded[1], key="mgr_ext2")
+            e3 = c3.text_input("Extended AE 3", value=padded[2], key="mgr_ext3")
+            for e in (e1, e2, e3):
+                if e.strip() and not db.user_exists(e.strip()):
+                    st.warning(f"\u26a0\ufe0f {e.strip()} isn't in Members — they won't be "
+                               f"able to log in until added.")
+            if st.form_submit_button("Save pairing", type="primary"):
+                ok, msg = db.set_ae_pairing(core_pick, [e1, e2, e3])
+                if ok:
+                    db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                else:
+                    st.error(msg)
+
+        with st.expander("\U0001F5D1\ufe0f Remove this Core AE's pairing", expanded=False):
+            conf = st.text_input("Type CONFIRM to remove", key="mgr_map_del_conf")
+            if st.button("Remove pairing", key="mgr_map_del_btn"):
+                if conf.strip().upper() != "CONFIRM":
+                    st.error("Type CONFIRM (in caps) to proceed.")
+                else:
+                    ok, msg = db.remove_ae_pairing(core_pick)
+                    if ok:
+                        db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                    else:
+                        st.error(msg)
+
+    # ================= FACULTY MAP (core_ae_faculty_map) =================
+    else:
+        st.markdown("#### Faculty map (trainer \u2192 Core AE)")
+        users = db.list_users()
+        core_opts = db.list_core_ae_emails()
+        core_pick = st.selectbox("Core AE", core_opts or ["(no core AEs yet)"], key="mgr_fac_core")
+        current = db.faculty_emails_for_core(core_pick) if core_opts else []
+        st.caption(f"{len(current)} trainer(s) mapped to {core_pick}.")
+        if current:
+            _light_df_table(pd.DataFrame({"trainer_email": current}))
+
+        with st.form("mgr_add_faculty"):
+            fe = st.text_input("Trainer email to add", key="mgr_fac_add")
+            if fe.strip() and not db.user_exists(fe.strip()):
+                st.caption("\u2139\ufe0f Note: a trainer usually isn't a portal login — "
+                           "that's fine, this only affects who this Core AE can observe.")
+            if st.form_submit_button("Add trainer", type="primary"):
+                ok, msg = db.add_faculty_to_core(core_pick, fe)
+                if ok:
+                    db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                else:
+                    st.error(msg)
+
+        with st.expander("\U0001F5D1\ufe0f Remove a trainer", expanded=False):
+            if not current:
+                st.caption("No trainers to remove.")
+            else:
+                rpick = st.selectbox("Trainer to remove", current, key="mgr_fac_del_pick")
+                conf = st.text_input("Type CONFIRM to remove", key="mgr_fac_del_conf")
+                if st.button("Remove trainer", key="mgr_fac_del_btn"):
+                    if conf.strip().upper() != "CONFIRM":
+                        st.error("Type CONFIRM (in caps) to proceed.")
+                    else:
+                        ok, msg = db.remove_faculty_from_core(core_pick, rpick)
+                        if ok:
+                            db.clear_app_caches(); st.success(msg); st.rerun(scope="fragment")
+                        else:
+                            st.error(msg)
 
 
 def _light_df_table(df, right_align=None):
