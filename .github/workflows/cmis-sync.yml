@@ -1,0 +1,68 @@
+name: CMIS Mirror Sync
+
+# ---------------------------------------------------------------------------
+# Runs sync_cmis_mirror.py every 30 minutes to refresh cmis_session_mirror
+# (rolling 30-day window: today .. today+29) in Anudip_AE_Team from live CMIS.
+#
+# The portal reads ONLY from the mirror, so this cadence is what keeps the
+# app's session data "live": a change in CMIS shows up in the portal within
+# ~30 min of the next sync (plus the app's own short read-cache TTL).
+#
+# Triggers:
+#   - schedule : every 30 minutes (:00 and :30 of every hour, UTC)
+#   - manual   : "Run workflow" button in the Actions tab (workflow_dispatch)
+#
+# NOTE ON GITHUB CRON: scheduled runs on GitHub Actions are best-effort and
+# can be delayed under load; the sync is idempotent (safe to run twice) so a
+# late or doubled run causes no harm. The 30-day mirror window is deliberate
+# slack -- even if several runs are skipped, the visible 10-day window stays
+# fully populated.
+#
+# All DB credentials come from GitHub repository Secrets — nothing is hardcoded.
+# ---------------------------------------------------------------------------
+
+on:
+  schedule:
+    # Every 30 minutes. cron is in UTC, but this cadence is timezone-agnostic
+    # (it fires at :00 and :30 past every hour regardless of IST offset).
+    - cron: "*/30 * * * *"
+  workflow_dispatch:        # lets you run it on-demand from the Actions tab
+
+# Prevent two syncs from overlapping if a run is slow / a manual run collides
+concurrency:
+  group: cmis-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Minimal deps the sync script actually needs (no streamlit/pyarrow).
+          pip install "sqlalchemy==2.0.43" "pymysql==1.1.1" "cryptography==45.0.5" "pandas==2.3.1"
+
+      - name: Run CMIS -> mirror sync
+        env:
+          CMIS_HOST:      ${{ secrets.CMIS_HOST }}
+          CMIS_PORT:      ${{ secrets.CMIS_PORT }}
+          CMIS_USER:      ${{ secrets.CMIS_USER }}
+          CMIS_PASSWORD:  ${{ secrets.CMIS_PASSWORD }}
+          CMIS_DB:        ${{ secrets.CMIS_DB }}
+          APPDB_HOST:     ${{ secrets.APPDB_HOST }}
+          APPDB_PORT:     ${{ secrets.APPDB_PORT }}
+          APPDB_USER:     ${{ secrets.APPDB_USER }}
+          APPDB_PASSWORD: ${{ secrets.APPDB_PASSWORD }}
+          APPDB_DB:       ${{ secrets.APPDB_DB }}
+        run: python sync_cmis_mirror.py
