@@ -286,24 +286,36 @@ def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
     if not blocks:
         return pd.DataFrame()
 
-    # Stage 1 — Extended AE auto-assignments, keyed the same way blocks are.
-    ext_by_key: dict[str, dict] = {}
+   # Stage 1 — Extended AE assignments. A saved assignment may cover only
+    # PART of a merged pool block (e.g. the block is 12:30-02:30 but only the
+    # 12:30-01:00 slice was free to pick, so that's what got saved). Matching
+    # on the exact span string therefore misses those, which is why some
+    # decided MIs showed "—" here. Instead we key each assignment by every
+    # 30-minute sub-slot it spans, on (date, batch, sub-slot), and a block
+    # matches if ANY of its member_slots has an assignment.
+    ext_by_subslot: dict[str, dict] = {}
     ext = db.get_mock_interview_assignments(None, from_date, to_date)
     if not ext.empty:
         for _, r in ext.iterrows():
             d = pd.to_datetime(r["session_date"]).date()
-            k = f"{d}|{r['slot_time']}|{r['batch_code'] or ''}"
-            cur = ext_by_key.get(k)
-            # A 'Selected' row always wins over a 'Not Selected' one, so a
-            # block someone actually took never looks abandoned just because
-            # a second, stale row exists for it.
-            if cur is None or (str(r["status"]) == "Selected"):
-                ext_by_key[k] = {
-                    "ae": r["extended_ae_email"], "status": str(r["status"]),
-                    "source": str(r.get("source") or ""),
-                    "remarks": r.get("remarks"),
-                }
-
+            batch = r["batch_code"] or ""
+            s0, e0 = _slot_start_end(str(r["slot_time"]))
+            m0, m1 = _to_minutes(s0), _to_minutes(e0)
+            if m1 <= m0:
+                m1 = m0 + 30
+            # one entry per 30-min sub-slot the assignment covers
+            for t in range(m0, m1, 30):
+                sk = f"{d}|{batch}|{t}"
+                cur = ext_by_subslot.get(sk)
+                # A 'Selected' row always wins over a 'Not Selected' one, so a
+                # block someone actually took never looks abandoned just
+                # because a second, stale row exists for it.
+                if cur is None or (str(r["status"]) == "Selected"):
+                    ext_by_subslot[sk] = {
+                        "ae": r["extended_ae_email"], "status": str(r["status"]),
+                        "source": str(r.get("source") or ""),
+                        "remarks": r.get("remarks"),
+                    }
     # Stages 2 and 3.
     claims = get_pool_claims(from_date, to_date)
     core_by_key: dict[str, dict] = {}
@@ -319,9 +331,23 @@ def build_pool(from_date: date, to_date: date) -> pd.DataFrame:
     rows: list[dict] = []
     for b in blocks:
         k = b["mi_key"]
-        e = ext_by_key.get(k, {})
         c = core_by_key.get(k, {})
         f = fac_by_key.get(k, {})
+
+        # Find the Extended AE assignment by ANY sub-slot this block covers.
+        # A 'Selected' sub-slot wins over a 'Not Selected' one.
+        e = {}
+        _bd = b["date"]
+        _batch = b.get("batch_code") or ""
+        for _ms in b.get("member_slots", [b["slot_time"]]):
+            _s0, _e0 = _slot_start_end(str(_ms))
+            _m0, _m1 = _to_minutes(_s0), _to_minutes(_e0)
+            if _m1 <= _m0:
+                _m1 = _m0 + 30
+            for _t in range(_m0, _m1, 30):
+                _hit = ext_by_subslot.get(f"{_bd}|{_batch}|{_t}")
+                if _hit and (not e or _hit.get("status") == "Selected"):
+                    e = _hit
 
         ext_status = e.get("status", "")
         core_status = c.get("status", "")
