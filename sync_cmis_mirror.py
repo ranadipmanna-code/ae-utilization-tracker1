@@ -125,7 +125,18 @@ def upsert(appdb: Engine, df: pd.DataFrame) -> int:
         ON DUPLICATE KEY UPDATE {updates}, synced_at=CURRENT_TIMESTAMP
         """
     )
-    records = df[insert_cols].where(pd.notnull(df[insert_cols]), None).to_dict("records")
+    # Build records, then scrub any NaN/NaT to None. A DataFrame .where()
+    # alone leaves numpy float NaN in all-null columns (e.g. alt_contact_no
+    # when no row in the batch has one), and MySQL rejects NaN outright
+    # ("nan can not be used with MySQL"). Cleaning per-value after to_dict
+    # guarantees every NaN becomes a real SQL NULL.
+    records = df[insert_cols].to_dict("records")
+    for _rec in records:
+        for _k, _v in _rec.items():
+            if _v is not None and _v != _v:  # NaN is the only value where v != v
+                _rec[_k] = None
+            elif pd.isna(_v):                # catches NaT and pandas NA too
+                _rec[_k] = None
     with appdb.begin() as conn:
         conn.execute(stmt, records)
     return len(records)
