@@ -243,6 +243,20 @@ def _css(t: dict, name: str = "light") -> str:
       }}
       [data-testid="stTooltipContent"] * ,
       div[role="tooltip"] * {{ color:{t['text']} !important; }}
+      /* Refresh + Sync: force a readable teal filled style in ALL states so
+         neither renders dark-on-dark. Both are type="primary" in the sidebar. */
+      [data-testid="stSidebar"] .stButton > button[kind="primary"] {{
+        background:{t['accent']} !important; color:{t['on_accent']} !important;
+        border:1.5px solid {t['accent']} !important; font-weight:600 !important;
+        opacity:1 !important;
+      }}
+      [data-testid="stSidebar"] .stButton > button[kind="primary"] * {{
+        color:{t['on_accent']} !important; opacity:1 !important;
+      }}
+      [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {{
+        background:{t['accent_hover']} !important; color:{t['on_accent']} !important;
+        border-color:{t['accent_hover']} !important;
+      }}
       .block-container {{ padding-top:2.2rem; padding-bottom:5rem; max-width:1120px; }}
       h1,h2,h3,h4 {{ font-family:"Poppins","Open Sans",sans-serif !important; }}
       h1 {{ font-weight:700; letter-spacing:-.02em; font-size:2rem; margin-bottom:0; line-height:1.18; }}
@@ -1061,7 +1075,7 @@ def dashboard():
         # the mirror by starting the same GitHub Action the hourly cron runs.
         # Takes ~1 minute, then the user presses Refresh to see them.
         with st.container(key="sync_btn"):
-            if st.button("⬇️ Sync latest CMIS sessions", use_container_width=True,
+            if st.button("⬇️ Sync latest CMIS sessions", use_container_width=True,type="primary",
                          help="Pull sessions just uploaded to CMIS into the portal. "
                               "Runs the sync on GitHub (~1 min), then press Refresh."):
                 with st.spinner("Starting CMIS sync…"):
