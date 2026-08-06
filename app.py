@@ -203,7 +203,7 @@ def _css(t: dict, name: str = "light") -> str:
       [data-testid="collapsedControl"] svg * {{
         color:{t['accent']} !important; fill:{t['accent']} !important;
         stroke:{t['accent']} !important; opacity:1 !important;
-      }
+      }}
       [data-testid="stSidebarCollapsedControl"] button,
       [data-testid="stSidebarCollapseButton"] button,
       [data-testid="collapsedControl"] button {{
