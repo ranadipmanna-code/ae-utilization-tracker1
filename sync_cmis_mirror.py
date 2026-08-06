@@ -57,6 +57,8 @@ COLS = [
     "s_date", "email_id", "m_code", "f_name", "l_name", "time_duration",
     "day_name", "c_alias", "slot_name", "slot_time", "batch_code",
     "class_link", "program_name",
+    # Contact info joined from anudip_cmis17.members on m_code = member_code.
+    "mobile_no", "alt_contact_no", "member_email",
 ]
 
 
@@ -81,13 +83,20 @@ def _session_key(email: str, s_date, slot_time, batch_code) -> str:
 def fetch_window(cmis: Engine, lo: date, hi: date) -> pd.DataFrame:
     sql = text(
         f"""
-        SELECT s_date, email_id, m_code, f_name, l_name, time_duration,
-               day_name, c_alias, slot_name, slot_time, batch_code,
-               class_link, program_name
-        FROM {CMIS_VIEW}
-        WHERE s_date BETWEEN :lo AND :hi
-          AND email_id IS NOT NULL AND TRIM(email_id) <> ''
-        ORDER BY s_date, slot_time
+        SELECT v.s_date, v.email_id, v.m_code, v.f_name, v.l_name,
+               v.time_duration, v.day_name, v.c_alias, v.slot_name,
+               v.slot_time, v.batch_code, v.class_link, v.program_name,
+               -- Trainer contact info from the members table, matched on the
+               -- trainer's member code. NULLIF drops the placeholder 0s so a
+               -- real alt_contact_no can be used as fallback in the app.
+               NULLIF(m.mobile_no, 0)      AS mobile_no,
+               NULLIF(m.alt_contact_no, 0) AS alt_contact_no,
+               m.email_id                  AS member_email
+        FROM {CMIS_VIEW} v
+        LEFT JOIN members m ON m.member_code = v.m_code
+        WHERE v.s_date BETWEEN :lo AND :hi
+          AND v.email_id IS NOT NULL AND TRIM(v.email_id) <> ''
+        ORDER BY v.s_date, v.slot_time
         """
     )
     with cmis.connect() as conn:
