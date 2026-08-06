@@ -1607,10 +1607,25 @@ def _render_mi_cards(df: pd.DataFrame, user_email: str, key_prefix: str) -> bool
     with st.form(f"{key_prefix}_mi_form"):
         for trainer, grp in d.groupby("Trainer", sort=False):
             first = grp.iloc[0]
+            # Contact line: mobile (falling back to alt) + email, shown under
+            # the trainer name. Pulled from the members table via the mirror.
+            _mob = _txt(first.get("mobile_no")) or _txt(first.get("alt_contact_no"))
+            _eml = _txt(first.get("member_email")) or _txt(first.get("email_id"))
+            _contact_bits = []
+            if _mob:
+                _contact_bits.append(f"\U0001F4F1 {_mob}")
+            if _eml:
+                _contact_bits.append(f"\u2709\ufe0f {_eml}")
+            _contact_line = (
+                "<div style='font-size:.8rem;opacity:.7;margin:-2px 0 6px 26px'>"
+                + " &nbsp;\u00b7&nbsp; ".join(_contact_bits) + "</div>"
+                if _contact_bits else ""
+            )
             st.markdown(
                 f"<div class='slot-head'>\U0001F464 {trainer or _txt(first.get('email_id')) or 'Unknown trainer'}"
                 f" &nbsp;\u00b7&nbsp; <span class='slot-count'>{len(grp)} session"
-                f"{'s' if len(grp) != 1 else ''}</span></div>",
+                f"{'s' if len(grp) != 1 else ''}</span></div>"
+                + _contact_line,
                 unsafe_allow_html=True,
             )
             for _, r in grp.iterrows():
