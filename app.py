@@ -218,6 +218,22 @@ def _css(t: dict, name: str = "light") -> str:
         background:{t['accent_hover']} !important;
         border-color:{t['accent_hover']} !important;
       }}
+      /* Broader net in case the exact testid differs on this Streamlit
+         version -- catches any testid containing "ollaps" and the classic
+         kind="header" attribute some versions still use. */
+      button[kind="header"],
+      [data-testid*="ollaps" i] button {{
+        background:{t['accent']} !important;
+        border:1px solid {t['accent']} !important;
+        border-radius:8px !important;
+      }}
+      button[kind="header"] *,
+      [data-testid*="ollaps" i] button *,
+      [data-testid*="ollaps" i] svg,
+      [data-testid*="ollaps" i] svg * {{
+        color:{t['on_accent']} !important; fill:{t['on_accent']} !important;
+        stroke:{t['on_accent']} !important; opacity:1 !important;
+      }}
       .block-container {{ padding-top:2.2rem; padding-bottom:5rem; max-width:1120px; }}
       h1,h2,h3,h4 {{ font-family:"Poppins","Open Sans",sans-serif !important; }}
       h1 {{ font-weight:700; letter-spacing:-.02em; font-size:2rem; margin-bottom:0; line-height:1.18; }}
