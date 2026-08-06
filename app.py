@@ -194,26 +194,29 @@ def _css(t: dict, name: str = "light") -> str:
          renders the arrow as an svg <path> that uses stroke, not fill), and
          cover both the old and new test-ids so the arrow always shows. */
       [data-testid="stSidebarCollapsedControl"] button,
+      [data-testid="stSidebarCollapseButton"] button,
+      [data-testid="collapsedControl"] button {{
+        background:{t['accent']} !important;
+        border:1px solid {t['accent']} !important;
+        border-radius:8px !important;
+      }}
+      [data-testid="stSidebarCollapsedControl"] button *,
+      [data-testid="stSidebarCollapseButton"] button *,
+      [data-testid="collapsedControl"] button *,
       [data-testid="stSidebarCollapsedControl"] svg,
       [data-testid="stSidebarCollapsedControl"] svg *,
-      [data-testid="stSidebarCollapseButton"] button,
       [data-testid="stSidebarCollapseButton"] svg,
       [data-testid="stSidebarCollapseButton"] svg *,
       [data-testid="collapsedControl"] svg,
       [data-testid="collapsedControl"] svg * {{
-        color:{t['accent']} !important; fill:{t['accent']} !important;
-        stroke:{t['accent']} !important; opacity:1 !important;
-      }}
-      [data-testid="stSidebarCollapsedControl"] button,
-      [data-testid="stSidebarCollapseButton"] button,
-      [data-testid="collapsedControl"] button {{
-        background:{t['surface']} !important;
-        border:1px solid {t['border']} !important;
+        color:{t['on_accent']} !important; fill:{t['on_accent']} !important;
+        stroke:{t['on_accent']} !important; opacity:1 !important;
       }}
       [data-testid="stSidebarCollapsedControl"] button:hover,
       [data-testid="stSidebarCollapseButton"] button:hover,
       [data-testid="collapsedControl"] button:hover {{
-        background:{t['chip_bg']} !important;
+        background:{t['accent_hover']} !important;
+        border-color:{t['accent_hover']} !important;
       }}
       .block-container {{ padding-top:2.2rem; padding-bottom:5rem; max-width:1120px; }}
       h1,h2,h3,h4 {{ font-family:"Poppins","Open Sans",sans-serif !important; }}
@@ -257,20 +260,15 @@ def _css(t: dict, name: str = "light") -> str:
         background:{t['accent_hover']} !important; color:{t['on_accent']} !important;
         border:none !important;
       }}
-      .st-key-refresh_btn .stButton > button * {{ color:{t['on_accent']} !important; }}
-      /* Sync-CMIS button: a clear bordered teal action, distinct from the
-         filled Refresh, and always readable (the generic muted sidebar style
-         made it look dark/greyed-out). */
       .st-key-sync_btn .stButton > button {{
-        background:{t['accent_soft']} !important; color:{t['accent']} !important;
+        background:{t['accent']} !important; color:{t['on_accent']} !important;
         border:1.5px solid {t['accent']} !important; font-weight:600 !important;
       }}
       .st-key-sync_btn .stButton > button:hover {{
-        background:{t['accent']} !important; color:{t['on_accent']} !important;
-        border-color:{t['accent']} !important;
+        background:{t['accent_hover']} !important; color:{t['on_accent']} !important;
+        border-color:{t['accent_hover']} !important;
       }}
-      .st-key-sync_btn .stButton > button * {{ color:inherit !important; }}
-
+      .st-key-sync_btn .stButton > button * {{ color:{t['on_accent']} !important; }}
       /* ---------- ALL INPUT SHELLS ---------- */
       div[data-baseweb="select"] > div,
       .stTextInput input, .stTextArea textarea,
@@ -4372,15 +4370,22 @@ def _team_rollup(core_ae_email, week_start, week_end):
         s = str(v).strip()
         return "" if s.lower() in ("nan", "none", "null") else s
 
-    merged["_sort_min"] = merged["slot_time"].apply(_slot_start_minutes)
-    merged = merged.sort_values(["owner_email", "session_date", "_sort_min"]).reset_index(drop=True)
+        merged = merged.sort_values(["owner_email", "session_date", "_sort_min"]).reset_index(drop=True)
     for owner, grp in merged.groupby("owner_email", sort=False):
         nm = name_by.get(str(owner).lower(), str(owner).split("@")[0])
+        n_obs = int((~grp["is_mi"] & ~grp["is_training"]).sum())
+        n_train = int(grp["is_training"].sum())
+        n_mi = int(grp["is_mi"].sum())
         st.markdown(
             f"<div class='slot-head'>\U0001F464 {nm}"
             f" &nbsp;\u00b7&nbsp; <span style='opacity:.55;font-weight:400'>{owner}</span>"
             f" &nbsp;\u00b7&nbsp; <span class='slot-count'>{len(grp)} session"
-            f"{'s' if len(grp) != 1 else ''}</span></div>",
+            f"{'s' if len(grp) != 1 else ''}</span>"
+            f"<div style='margin-top:6px;display:flex;gap:6px;flex-wrap:wrap'>"
+            f"<span class='pill pill-lock'>\U0001F441\uFE0F Observation: {n_obs}</span>"
+            f"<span class='pill pill-training'>\U0001F4DA Training: {n_train}</span>"
+            f"<span class='pill pill-mi'>\U0001F3AF MI: {n_mi}</span>"
+            f"</div></div>",
             unsafe_allow_html=True,
         )
         _current_day = None
