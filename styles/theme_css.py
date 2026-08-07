@@ -776,9 +776,14 @@ def build_css(t: dict, name: str = "light") -> str:
       }}
       .stTabs [aria-selected="true"] * {{ color:{t['accent']} !important; }}
 
-      /* Primary buttons everywhere -> solid teal with depth (never red). */
+      /* Primary buttons -> solid teal with depth (never red).
+         This Streamlit build renders NO kind="primary" attribute (only
+         emotion-cache classes), so we match ALL of these forms to be safe:
+         the kind attr, the data-testid, AND the aria/emotion "primary" class. */
       .stButton > button[kind="primary"],
       .stButton > button[data-testid="stBaseButton-primary"],
+      .stButton > button.st-emotion-cache-1krtkoa,
+      button[data-testid="baseButton-primary"],
       .stFormSubmitButton > button[kind="primaryFormSubmit"],
       .stFormSubmitButton > button[data-testid="stBaseButton-primaryFormSubmit"] {{
         background:linear-gradient(180deg, {t['accent_lite']}, {t['accent']}) !important;
@@ -786,25 +791,44 @@ def build_css(t: dict, name: str = "light") -> str:
         box-shadow:0 6px 16px {t['accent']}38 !important;
       }}
       .stButton > button[kind="primary"] *,
+      .stButton > button.st-emotion-cache-1krtkoa *,
       .stFormSubmitButton > button[kind="primaryFormSubmit"] * {{ color:#ffffff !important; }}
       .stButton > button[kind="primary"]:hover,
+      .stButton > button.st-emotion-cache-1krtkoa:hover,
       .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover {{
         background:linear-gradient(180deg, {t['accent']}, {t['accent_hover']}) !important;
         box-shadow:0 10px 24px {t['accent']}55 !important; transform:translateY(-1px);
       }}
 
-      /* Sidebar primary buttons (Refresh + Sync) -> same teal treatment. */
+      /* Sidebar Refresh + Sync -> teal. This build has no kind="primary" attr,
+         so we colour the primary-looking sidebar buttons by matching the
+         emotion class AND fall back to type=primary forms. Sign out (secondary)
+         is quieted right after so it stays outlined. */
       [data-testid="stSidebar"] .stButton > button[kind="primary"],
-      [data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] {{
+      [data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"],
+      [data-testid="stSidebar"] .stButton > button.st-emotion-cache-1krtkoa {{
         background:linear-gradient(180deg, {t['accent_lite']}, {t['accent']}) !important;
         color:#ffffff !important; border:1px solid {t['accent']} !important;
         box-shadow:0 6px 16px {t['accent']}38 !important;
       }}
-      [data-testid="stSidebar"] .stButton > button[kind="primary"] * {{ color:#ffffff !important; }}
-      [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {{
+      [data-testid="stSidebar"] .stButton > button[kind="primary"] *,
+      [data-testid="stSidebar"] .stButton > button.st-emotion-cache-1krtkoa * {{ color:#ffffff !important; }}
+      [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover,
+      [data-testid="stSidebar"] .stButton > button.st-emotion-cache-1krtkoa:hover {{
         background:linear-gradient(180deg, {t['accent']}, {t['accent_hover']}) !important;
         box-shadow:0 10px 24px {t['accent']}55 !important;
       }}
+      /* Broadest cross-version fallback: Streamlit tags primary buttons with
+         a data-testid that has varied by version -- match every known form. */
+      [data-testid="stSidebar"] button[data-testid*="rimary"],
+      button[data-testid*="baseButton-primary"],
+      button[data-testid*="BaseButton-primary"] {{
+        background:linear-gradient(180deg, {t['accent_lite']}, {t['accent']}) !important;
+        color:#ffffff !important; border:1px solid {t['accent']} !important;
+        box-shadow:0 6px 16px {t['accent']}38 !important;
+      }}
+      [data-testid="stSidebar"] button[data-testid*="rimary"] * ,
+      button[data-testid*="baseButton-primary"] * {{ color:#ffffff !important; }}
 
       /* Session / info cards: lift on hover, crisper teal left-accent. */
       .scard {{
