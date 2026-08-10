@@ -891,5 +891,179 @@ def build_css(t: dict, name: str = "light") -> str:
       }}
       [data-testid="stTooltipContent"] *, div[role="tooltip"] * {{ color:{t['text']} !important; }}
 
+
+      /* ========================================================= */
+      /* ==========  APP-LIKE REWORK LAYER (v2)  ================= */
+      /* Turns the plain Streamlit page into something that reads   */
+      /* like a designed product: a real auth card, a floating      */
+      /* brand header, softer depth, springier interactions.        */
+      /* Appended last so it wins over everything above.            */
+      /* ========================================================= */
+
+      /* --- Global rhythm: a touch more air, tighter max width --- */
+      .block-container {{ padding-top:1.6rem !important; max-width:1100px; }}
+
+      /* Animated, very soft brand aura on the canvas. */
+      .stApp {{
+        background:
+          radial-gradient(1000px 520px at 105% -8%, {t['accent']}14, transparent 58%),
+          radial-gradient(760px 460px at -8% 112%, {t['accent']}10, transparent 55%),
+          {t['bg']} !important;
+      }}
+
+      /* ---------------------------------------------------------- */
+      /* LOGIN: centered auth card with real depth                  */
+      /* login_view() wraps its column content in .login-wrap, so   */
+      /* we turn that wrapper into a floating card.                 */
+      /* ---------------------------------------------------------- */
+      .login-wrap {{
+        margin-top:5vh;
+        background:{t['surface']};
+        border:1px solid {t['border']};
+        border-radius:22px;
+        padding:30px 30px 26px;
+        box-shadow:
+          0 1px 2px rgba(12,23,37,.04),
+          0 18px 50px -12px rgba(12,23,37,.22),
+          0 0 0 1px rgba(255,255,255,.02) inset;
+        position:relative; overflow:hidden;
+        animation:cardIn .5s cubic-bezier(.2,.8,.2,1) both;
+      }}
+      @keyframes cardIn {{
+        from {{ opacity:0; transform:translateY(14px) scale(.985); }}
+        to   {{ opacity:1; transform:translateY(0) scale(1); }}
+      }}
+      /* thin teal shimmer strip across the very top of the card */
+      .login-wrap::before {{
+        content:""; position:absolute; left:0; right:0; top:0; height:4px;
+        background:linear-gradient(90deg, {t['accent']}, {t['accent_lite']} 55%, {t['accent']});
+        background-size:200% 100%;
+        animation:sheen 6s linear infinite;
+      }}
+      @keyframes sheen {{ from {{ background-position:0 0; }} to {{ background-position:200% 0; }} }}
+
+      /* Brand header inside the login card: give it presence. */
+      .login-wrap .brandbar {{
+        margin:2px 0 20px !important;
+        border-radius:16px !important;
+        padding:14px 18px !important;
+        box-shadow:0 8px 24px -8px rgba(12,23,37,.4) !important;
+      }}
+      .login-title {{
+        font-family:"Poppins",sans-serif !important;
+        font-size:1.75rem !important; font-weight:700 !important;
+        letter-spacing:-.03em; line-height:1.15;
+      }}
+      /* kill the global h1 orange/teal underline creeping onto the login title */
+      .login-title::after {{ display:none !important; }}
+      .login-sub {{ margin-bottom:22px !important; }}
+
+      /* Field labels: smaller, quieter, uppercase micro-labels = app feel. */
+      .login-wrap [data-testid="stTextInput"] label p,
+      .login-wrap .stTextInput label p {{
+        font-size:.72rem !important; font-weight:700 !important;
+        letter-spacing:.06em; text-transform:uppercase;
+        color:{t['muted']} !important;
+      }}
+      /* Inputs: taller, rounder, with a clear teal focus glow. */
+      .login-wrap .stTextInput input {{
+        min-height:48px !important; border-radius:12px !important;
+        font-size:.95rem !important;
+      }}
+      /* Primary "Sign in" button: full-width gradient pill with lift. */
+      .login-wrap .stFormSubmitButton > button {{
+        width:100% !important; min-height:48px !important;
+        border-radius:12px !important; font-size:.98rem !important;
+        font-weight:700 !important; letter-spacing:.01em;
+        background:linear-gradient(180deg, {t['accent_lite']}, {t['accent']}) !important;
+        color:#fff !important; border:none !important;
+        box-shadow:0 8px 20px {t['accent']}44 !important;
+        transition:transform .12s ease, box-shadow .2s ease, filter .2s ease;
+      }}
+      .login-wrap .stFormSubmitButton > button * {{ color:#fff !important; }}
+      .login-wrap .stFormSubmitButton > button:hover {{
+        transform:translateY(-1px);
+        box-shadow:0 12px 28px {t['accent']}5c !important; filter:brightness(1.03);
+      }}
+      .login-wrap .stFormSubmitButton > button:active {{ transform:translateY(0) scale(.99); }}
+
+      /* The "Change password" expander: make it read as a subtle secondary. */
+      .login-wrap [data-testid="stExpander"] {{
+        border:1px dashed {t['border']} !important;
+        background:transparent !important; border-radius:12px !important;
+        margin-top:6px;
+      }}
+      .login-wrap [data-testid="stExpander"] summary {{ font-weight:600; }}
+
+      /* DB status dots: turn the plain caption into a pill row. */
+      .dbdot {{
+        display:inline-flex; align-items:center; gap:6px;
+        background:{t['surface_2']}; border:1px solid {t['border']};
+        padding:6px 12px; border-radius:999px;
+        font-size:.75rem !important; font-weight:600;
+        margin-top:16px !important;
+      }}
+
+      /* ---------------------------------------------------------- */
+      /* APP SHELL: floating glassy brand header (main view)        */
+      /* The main app also renders .brandbar; make it feel pinned   */
+      /* and premium without changing any markup.                   */
+      /* ---------------------------------------------------------- */
+      [data-testid="stAppViewContainer"] .main .brandbar {{
+        backdrop-filter:saturate(1.2) blur(2px);
+        box-shadow:0 10px 30px -10px rgba(12,23,37,.35) !important;
+      }}
+
+      /* Metric values pop in the brand teal, labels quiet. */
+      [data-testid="stMetricValue"] {{
+        color:{t['accent_text']} !important; font-weight:750 !important;
+        letter-spacing:-.02em;
+      }}
+
+      /* Stat cards: deeper hover lift + a faint gradient sheen. */
+      .stat {{
+        border-radius:16px !important;
+        box-shadow:0 1px 2px rgba(12,23,37,.05) !important;
+      }}
+      .stat:hover {{
+        transform:translateY(-3px) !important;
+        box-shadow:0 14px 30px -10px rgba(12,23,37,.22) !important;
+      }}
+
+      /* Cards (session / task): rounder, springier, cleaner shadow. */
+      .scard, .tcard, .sess-card {{
+        border-radius:14px !important;
+        transition:transform .16s cubic-bezier(.2,.8,.2,1), box-shadow .16s ease !important;
+      }}
+      .scard:hover, .tcard:hover {{
+        transform:translateY(-2px) !important;
+        box-shadow:0 12px 26px -12px rgba(12,23,37,.24) !important;
+      }}
+
+      /* Tabs: cleaner pill row, active tab gets a soft teal fill. */
+      .stTabs [data-baseweb="tab-list"] {{ border-radius:14px !important; }}
+      .stTabs [aria-selected="true"] {{
+        background:{t['accent']}16 !important;
+        box-shadow:inset 0 -2px 0 {t['accent']} !important;
+        color:{t['accent_text']} !important;
+      }}
+      .stTabs [aria-selected="true"] * {{ color:{t['accent_text']} !important; }}
+
+      /* Global button springiness (applies app-wide, cheap + delightful). */
+      .stButton > button, .stDownloadButton > button {{
+        transition:transform .12s ease, box-shadow .2s ease, background .2s ease !important;
+      }}
+      .stButton > button:active {{ transform:scale(.97); }}
+
+      /* Expanders + alerts: slightly rounder to match the new radius scale. */
+      [data-testid="stExpander"] {{ border-radius:14px !important; }}
+      [data-testid="stAlert"] {{ border-radius:12px !important; }}
+
+      /* Respect reduced-motion preferences. */
+      @media (prefers-reduced-motion: reduce) {{
+        .login-wrap, .login-wrap::before {{ animation:none !important; }}
+        .stat:hover, .scard:hover, .tcard:hover {{ transform:none !important; }}
+      }}
+
     </style>
     """
