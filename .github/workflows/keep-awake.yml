@@ -1,0 +1,65 @@
+name: keep-awake
+
+on:
+  schedule:
+    # Runs every 10 minutes (GitHub cron is best-effort; may drift a few min)
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}   # allows manual "Run workflow" from the Actions tab
+
+concurrency:
+  group: keep-awake
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright (Chromium)
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm i -D playwright >/dev/null 2>&1
+          npx playwright install --with-deps chromium
+
+      - name: Wake the Streamlit app
+        run: |
+          cat > keepalive.js <<'EOF'
+          const { chromium } = require("playwright");
+
+          const URL = "https://ae-utilization-tracker1-do2vybnyanmsj6nnsxv6rb.streamlit.app/";
+
+          (async () => {
+            const browser = await chromium.launch();
+            const page = await browser.newPage();
+            try {
+              await page.goto(URL, { waitUntil: "networkidle", timeout: 90000 });
+
+              // If the app is asleep, Streamlit shows a wake-up button.
+              const wake = page.getByText(/get this app back up/i);
+              if (await wake.isVisible().catch(() => false)) {
+                console.log("App was asleep — clicking wake button...");
+                await wake.click();
+                // Give the container time to boot.
+                await page.waitForTimeout(30000);
+                await page.waitForLoadState("networkidle", { timeout: 90000 }).catch(() => {});
+              } else {
+                console.log("App already awake.");
+              }
+
+              // Keep the websocket session open briefly so it counts as real traffic.
+              await page.waitForTimeout(15000);
+              console.log("Keep-alive session complete.");
+            } catch (err) {
+              console.error("Keep-alive error:", err.message);
+              process.exit(1);
+            } finally {
+              await browser.close();
+            }
+          })();
+          EOF
+          node keepalive.js
