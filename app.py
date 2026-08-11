@@ -1,5 +1,5 @@
 """
-Extended AE Utilization Tracker — Streamlit edition.
+Extended AE Engage — Streamlit edition.
 
 Reads faculty sessions from the CMIS view (read-only) and reads/writes app
 state to the Anudip_AE_Team database (the hackathon tables).
@@ -210,7 +210,7 @@ def login_view():
             + _brand_mark_html() +
             '<div><div class="bb-name">Anudip Foundation</div>'
             '<div class="bb-tag">Life. Transformed.</div></div></div>'
-            '<div class="login-title">AE Utilization Tracker</div>'
+            '<div class="login-title">Extended AE Engage</div>'
             '<div class="login-sub">Academic Excellence · Anudip Foundation</div>',
             unsafe_allow_html=True,
         )
@@ -388,7 +388,7 @@ def dashboard():
         "<div class='bb-tag'>Life. Transformed.</div></div>"
         "<div class='bb-right'>Academic Excellence</div>"
         "</div>"
-        "<h1 style='margin-bottom:2px'>Extended AE Utilization Tracker</h1>"
+        "<h1 style='margin-bottom:2px'>Extended AE Engage</h1>"
         "<p style='opacity:.6;margin-top:10px;font-size:.92rem'>"
         "Faculty observation scheduling · live from CMIS + Anudip AE Team DB</p>",
         unsafe_allow_html=True,
