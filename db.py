@@ -691,7 +691,10 @@ def ping() -> tuple[bool, bool]:
 def make_session_id(trainer_email: str, session_date, slot_time: str, batch_code: str | None) -> str:
     """Stable key for a CMIS session (the view has no surrogate id of its own)."""
     d = pd.to_datetime(session_date).date().isoformat()
-    return f"{trainer_email}|{d}|{slot_time}|{batch_code or ''}"
+    # Lowercase + strip the email so this natural key is byte-identical to the
+    # one the mirror hashes (sync_cmis_mirror._session_key). Prevents silent
+    # match failures if this key is ever joined against cmis_session_mirror.
+    return f"{str(trainer_email).strip().lower()}|{d}|{slot_time}|{batch_code or ''}"
 
 
 def get_evaluations(evaluator_email: str | None = None) -> pd.DataFrame:
