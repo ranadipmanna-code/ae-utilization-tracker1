@@ -13,12 +13,19 @@ concurrency:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8          # was 5 — give Chromium install + cold wake more room
     steps:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      # Cache the browser so we don't re-download Chromium on every run.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
 
       - name: Install Playwright (Chromium)
         run: |
@@ -32,34 +39,55 @@ jobs:
           const { chromium } = require("playwright");
 
           const URL = "https://ae-utilization-tracker1-do2vybnyanmsj6nnsxv6rb.streamlit.app/";
+          const MAX_ATTEMPTS = 3;
 
-          (async () => {
+          async function attempt(n) {
             const browser = await chromium.launch();
             const page = await browser.newPage();
             try {
-              await page.goto(URL, { waitUntil: "networkidle", timeout: 90000 });
+              // domcontentloaded, NOT networkidle: Streamlit holds a websocket
+              // open so the network never goes fully idle -> networkidle times
+              // out even when the app is perfectly healthy. This was the main
+              // cause of the flaky failures.
+              await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-              // If the app is asleep, Streamlit shows a wake-up button.
-              const wake = page.getByText(/get this app back up/i);
+              // If the app is asleep, Streamlit shows a wake-up button. Match a
+              // few possible wordings so a Streamlit copy change doesn't break us.
+              const wake = page.getByText(/get this app back up|wake|yes, get this app back up/i);
               if (await wake.isVisible().catch(() => false)) {
                 console.log("App was asleep — clicking wake button...");
-                await wake.click();
-                // Give the container time to boot.
-                await page.waitForTimeout(30000);
-                await page.waitForLoadState("networkidle", { timeout: 90000 }).catch(() => {});
+                await wake.click().catch(() => {});
+                await page.waitForTimeout(30000); // let the container boot
               } else {
                 console.log("App already awake.");
               }
 
-              // Keep the websocket session open briefly so it counts as real traffic.
-              await page.waitForTimeout(15000);
-              console.log("Keep-alive session complete.");
-            } catch (err) {
-              console.error("Keep-alive error:", err.message);
-              process.exit(1);
-            } finally {
+              // Keep the session open briefly so it counts as real traffic.
+              await page.waitForTimeout(12000);
+              console.log("Keep-alive session complete (attempt " + n + ").");
               await browser.close();
+              return true;
+            } catch (err) {
+              console.error("Attempt " + n + " failed:", err.message);
+              await browser.close().catch(() => {});
+              return false;
             }
+          }
+
+          (async () => {
+            for (let i = 1; i <= MAX_ATTEMPTS; i++) {
+              if (await attempt(i)) process.exit(0);
+              if (i < MAX_ATTEMPTS) {
+                console.log("Retrying in 10s...");
+                await new Promise(r => setTimeout(r, 10000));
+              }
+            }
+            // All attempts failed. This is a keep-alive ping, not critical data:
+            // log loudly but DON'T fail the whole workflow, so a transient
+            // Streamlit hiccup stops spamming you with red 'failed' emails.
+            // (Change to process.exit(1) if you'd rather be alerted every time.)
+            console.error("All " + MAX_ATTEMPTS + " attempts failed — app may be down. Not failing the job.");
+            process.exit(0);
           })();
           EOF
           node keepalive.js
