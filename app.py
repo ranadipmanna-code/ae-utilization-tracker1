@@ -31,7 +31,7 @@ import streamlit as st
 import db
 import mi_pool
 
-st.set_page_config(page_title="AE Utilization Tracker", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Extended AE Engage", layout="wide", page_icon="📊")
 
 
 # ---------------------------------------------------------------------------
