@@ -5,7 +5,7 @@ sync_cmis_mirror.py  —  daily CMIS -> Anudip mirror refresh (cron job)
 WHAT IT DOES
 ------------
 1. Reads the next 30 days (today .. today+29) of sessions from the live CMIS
-   view `upcoming_trainer_utilization_view`.
+   view `trainer_utilization_view`.
 2. Upserts them into `Anudip_AE_Team.cmis_session_mirror` (idempotent — safe
    to run twice in a day).
 3. Prunes the mirror: deletes anything with s_date < today (yesterday and
