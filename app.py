@@ -257,7 +257,7 @@ def login_view():
                         st.success("Password updated — sign in with your new password.")
 
         _theme_toggle("theme_login")
-                cmis_ok, app_ok = db.ping()
+        cmis_ok, app_ok = db.ping()
         cmis_html = "CMIS ⚪ (mirror)" if cmis_ok is None \
             else f'CMIS {"🟢" if cmis_ok else "🔴"}'
         st.markdown(
