@@ -34,7 +34,7 @@ state to the Anudip_AE_Team database (the hackathon tables).
 
 ## Databases
 
-- **CMIS** (read-only): `upcoming_trainer_utilization_view` — faculty sessions,
+- **CMIS** (read-only): `trainer_utilization_view` — faculty sessions,
   and also the source of each member's own slot grid (rows where `email_id`
   is that member) used by the Mock Interview default.
 - **App DB** (read/write): `core_ae_faculty_map`, `extended_ae_session_selection`,
