@@ -48,7 +48,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-CMIS_VIEW = "upcoming_trainer_utilization_view"
+CMIS_VIEW = "trainer_utilization_view"
 MIRROR_TABLE = "cmis_session_mirror"
 WINDOW_DAYS = 30  # today .. today + (WINDOW_DAYS - 1)
 
