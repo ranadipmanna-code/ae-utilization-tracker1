@@ -24,7 +24,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-CMIS_VIEW = "upcoming_trainer_utilization_view"
+CMIS_VIEW = "trainer_utilization_view"
 SNAP_TABLE = "cmis_trainer_directory"
 
 
