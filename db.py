@@ -2044,7 +2044,8 @@ def get_cmis_directory() -> pd.DataFrame:
         GROUP BY 1, 2
         """
     )
-        eng = cmis_engine()
+        
+    eng = cmis_engine()
     if eng is None:
         # No live CMIS on this deployment — read the snapshot the
         # cmis-health.yml Action writes into the App DB instead.
