@@ -2,7 +2,7 @@
 -- CMIS task defaults / slot task assignment  ->  table: ae_slot_task
 -- Run ONCE in phpMyAdmin: Anudip_AE_Team -> SQL tab -> paste -> Go
 --
--- Each slot in a member's OWN CMIS schedule (upcoming_trainer_utilization_view
+-- Each slot in a member's OWN CMIS schedule (trainer_utilization_view
 -- rows where email_id = their email) has a DEFAULT task DERIVED FROM CMIS via
 -- the course alias (c_alias):
 --     plr* family (plr_mi1/2, plr_crd1/2, plr_mi_save, PLR_SAVE — the
