@@ -39,7 +39,17 @@ def _make_engine(section: str) -> Engine:
 
 
 @st.cache_resource
-def cmis_engine() -> Engine:
+def cmis_engine() -> Engine | None:
+    """Live CMIS engine, or None when no `cmis` secret is configured.
+
+    On Streamlit Cloud we deliberately do NOT ship Tekdi's CMIS credentials —
+    that's a third-party host; those creds live only in GitHub Actions
+    (cmis-sync.yml / cmis-health.yml). The portal reads all session data from
+    the App-DB mirror, and the admin report reads a snapshot table, so a
+    missing `cmis` secret is a supported configuration, not an error.
+    """
+    if "cmis" not in st.secrets:
+        return None
     return _make_engine("cmis")
 
 
@@ -661,21 +671,20 @@ def upsert_weekly_summary(
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def ping() -> tuple[bool, bool]:
-    """Return (cmis_ok, appdb_ok) for the connection self-test.
-
-    Cached: this renders in the sidebar, so uncached it fired two round-trips
-    on every single rerun -- every dropdown change, every checkbox tick -- just
-    to redraw two status dots. A 30-second TTL still surfaces an outage
-    promptly without taxing every interaction.
-    """
-    cmis_ok = appdb_ok = False
-    try:
-        with cmis_engine().connect() as conn:
-            conn.execute(text("SELECT 1"))
-        cmis_ok = True
-    except Exception:
-        pass
+def ping() -> tuple[bool | None, bool]:
+    """Return (cmis_ok, appdb_ok). cmis_ok is None when CMIS isn't configured
+    on this deployment (the normal Streamlit Cloud case)."""
+    cmis_ok: bool | None = None
+    appdb_ok = False
+    eng = cmis_engine()
+    if eng is not None:
+        cmis_ok = False
+        try:
+            with eng.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            cmis_ok = True
+        except Exception:
+            pass
     try:
         with app_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
@@ -2035,8 +2044,36 @@ def get_cmis_directory() -> pd.DataFrame:
         GROUP BY 1, 2
         """
     )
-    with cmis_engine().connect() as conn:
+        eng = cmis_engine()
+    if eng is None:
+        # No live CMIS on this deployment — read the snapshot the
+        # cmis-health.yml Action writes into the App DB instead.
+        return get_cmis_directory_from_mirror()
+    with eng.connect() as conn:
         df = pd.read_sql(sql, conn)
+    if df.empty:
+        return df
+    df["norm_local"] = df["cmis_email"].map(_local_part)
+    df["norm_name"] = df["cmis_full_name"].map(_norm)
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cmis_directory_from_mirror() -> pd.DataFrame:
+    """Same shape as get_cmis_directory(), sourced from the App-DB snapshot
+    table cmis_trainer_directory (written by cmis-health.yml). Returns an empty
+    frame if the snapshot table doesn't exist yet."""
+    sql = text(
+        """
+        SELECT cmis_email, cmis_full_name, slot_count, first_slot, last_slot
+        FROM cmis_trainer_directory
+        """
+    )
+    try:
+        with app_engine().connect() as conn:
+            df = pd.read_sql(sql, conn)
+    except Exception:
+        return pd.DataFrame()
     if df.empty:
         return df
     df["norm_local"] = df["cmis_email"].map(_local_part)
