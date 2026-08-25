@@ -28,7 +28,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 SECRETS = Path(".streamlit/secrets.toml")
-VIEW = "upcoming_trainer_utilization_view"
+VIEW = "trainer_utilization_view"
 
 # Everything this test writes is tagged with this so cleanup is exact.
 TEST_EMAIL = "zz.testrun@anudip.invalid"
