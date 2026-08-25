@@ -2,7 +2,7 @@
 Database access layer.
 
 Two connections:
-  * CMIS  (read-only)  -> faculty sessions, from `upcoming_trainer_utilization_view`
+  * CMIS  (read-only)  -> faculty sessions, from `trainer_utilization_view`
   * appdb (read/write) -> the 5 Anudip_AE_Team tables:
         core_ae_faculty_map, extended_ae_session_selection,
         session_highlight_flags, user_roles, weekly_ae_summary
