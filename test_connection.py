@@ -39,7 +39,7 @@ def main():
     try:
         eng = engine_for(s["cmis"])
         with eng.connect() as c:
-            n = c.execute(text("SELECT COUNT(*) FROM upcoming_trainer_utilization_view")).scalar()
+            n = c.execute(text("SELECT COUNT(*) FROM trainer_utilization_view")).scalar(
             print(f"  ✅ CMIS reachable. upcoming_trainer_utilization_view has {n} rows.")
     except Exception as e:
         print(f"  ❌ CMIS failed: {e}")
