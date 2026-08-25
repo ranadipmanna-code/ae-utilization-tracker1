@@ -45,7 +45,7 @@ CORE_AE = {
 # 13 Extended AEs (email -> name).
 #
 # IMPORTANT: these addresses are the ones CMIS actually stores in
-# upcoming_trainer_utilization_view.email_id, NOT the "tidy" firstname.lastname
+# trainer_utilization_view.email_id, NOT the "tidy" firstname.lastname
 # form. The app joins CMIS on an exact email string match, so any drift here
 # means that Extended AE silently shows an empty Calendar/Sessions tab even
 # though their sessions exist. Six were wrong before and are marked below.
