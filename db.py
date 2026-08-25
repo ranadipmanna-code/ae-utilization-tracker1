@@ -66,7 +66,7 @@ def app_engine() -> Engine:
 # through the local mirror (see below). CMIS_VIEW is now used only by the admin
 # email-reconciliation report (get_cmis_directory), which genuinely needs the
 # full CMIS roster across all dates.
-CMIS_VIEW = "upcoming_trainer_utilization_view"
+CMIS_VIEW = "trainer_utilization_view"
 
 # ---------------------------------------------------------------------------
 # Local CMIS mirror  (fast path)
