@@ -136,7 +136,7 @@ def verify_against_cmis() -> int:
         known = {
             str(r[0]).strip().lower()
             for r in conn.execute(text(
-                "SELECT DISTINCT email_id FROM upcoming_trainer_utilization_view "
+                "SELECT DISTINCT email_id FROM trainer_utilization_view "
                 "WHERE email_id IS NOT NULL"
             ))
         }
