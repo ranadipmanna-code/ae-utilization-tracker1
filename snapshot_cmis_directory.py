@@ -41,14 +41,14 @@ def _engine(prefix: str) -> Engine:
 def fetch_directory(cmis: Engine) -> pd.DataFrame:
     sql = text(
         f"""
-        SELECT LOWER(TRIM(email_id))                    AS cmis_email,
-               LOWER(TRIM(CONCAT(f_name, ' ', l_name))) AS cmis_full_name,
-               COUNT(*)                                 AS slot_count,
-               MIN(s_date)                              AS first_slot,
-               MAX(s_date)                              AS last_slot
+        SELECT LOWER(TRIM(email_id))                         AS cmis_email,
+               MAX(LOWER(TRIM(CONCAT(f_name, ' ', l_name)))) AS cmis_full_name,
+               COUNT(*)                                      AS slot_count,
+               MIN(s_date)                                   AS first_slot,
+               MAX(s_date)                                   AS last_slot
         FROM {CMIS_VIEW}
         WHERE email_id IS NOT NULL AND TRIM(email_id) <> ''
-        GROUP BY 1, 2
+        GROUP BY 1
         """
     )
     with cmis.connect() as conn:
