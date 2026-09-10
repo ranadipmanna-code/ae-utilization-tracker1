@@ -1759,7 +1759,7 @@ def default_task_for_alias(c_alias: str | None) -> str:
     Everything else is a real teaching module -> teaching.
     """
     a = (c_alias or "").strip().lower()
-    if a.startswith("plr"):
+    if a.startswith("plr") and not a.startswith("plr_crd"):
         return "mock_interview"
     return "teaching"
 
